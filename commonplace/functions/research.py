@@ -283,6 +283,7 @@ async def run_research_agent(ctx: inngest.Context) -> dict[str, object]:
                     "faithfulness": scores["faithfulness"],
                     "disagreement": scores["disagreement"],
                     "failure_codes": scores["failure_codes"],
+                    "judge_version": scores["judge_version"],
                     "limits": {"max_iterations": max_iterations, "max_usd": max_usd},
                     "search_usd": gathered["spent_usd"],
                 },

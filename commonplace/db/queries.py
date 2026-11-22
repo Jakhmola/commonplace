@@ -740,6 +740,7 @@ async def upsert_eval_result(
     disagreement_critique: str,
     failure_codes: list[str],
     composite_score: float,
+    judge_version: str | None = None,
 ) -> uuid.UUID:
     """Record how a snapshot scored, replacing any earlier score, and put the
     composite score on the snapshot as its confidence.
@@ -753,6 +754,7 @@ async def upsert_eval_result(
         "disagreement_critique": disagreement_critique,
         "failure_codes": failure_codes,
         "composite_score": composite_score,
+        "judge_version": judge_version,
         # the moment of evaluation, not of the transaction's start
         "created_at": func.clock_timestamp(),
     }
@@ -836,6 +838,12 @@ async def get_latest_eval_report(session: AsyncSession, limit: int = 10) -> dict
         .order_by(each.c.code)
     )
 
+    versions = await session.execute(
+        select(func.coalesce(EvalResult.judge_version, "unknown"), func.count()).group_by(
+            EvalResult.judge_version
+        )
+    )
+
     failed = await session.execute(
         select(EvalResult, Snapshot.question)
         .join(Snapshot, Snapshot.snapshot_id == EvalResult.snapshot_id)
@@ -878,6 +886,8 @@ async def get_latest_eval_report(session: AsyncSession, limit: int = 10) -> dict
             "disagreement_judged": totals.disagree_judged,
             "disagreement_pass_rate": _rate(totals.disagree_passed, totals.disagree_judged),
             "mean_confidence": round(float(mean), 4) if mean is not None else None,
+            # Verdicts from different judges (model or prompts) are not comparable.
+            "judge_versions": {version: count for version, count in versions.all()},
         },
         "failure_modes": {name: count for name, count in codes.all()},
         "recent_failures": recent_failures,

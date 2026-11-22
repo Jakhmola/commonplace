@@ -72,6 +72,21 @@ def should_retire_claims(failure: dict[str, Any]) -> bool:
     return (failure.get("event") or {}).get("name") == ARTICLE_UPDATED
 
 
+def claims_predate_the_edit(failure: dict[str, Any], valid_from: list[datetime]) -> bool:
+    """Were the article's current claims extracted before the edit whose run failed?
+
+    The failed run may have got as far as storing new claims and then failed in
+    a later step. Those claims are current and must stay: only claims older
+    than the edit quote text that is gone.
+    """
+    if not valid_from:
+        return False
+    ts = (failure.get("event") or {}).get("ts")
+    if ts is None:
+        return True  # nothing to compare against: assume they are stale
+    return any(at < datetime.fromtimestamp(ts / 1000, UTC) for at in valid_from)
+
+
 def extraction_step_id(*, has_key: bool) -> str:
     """The model call and its no-key stand-in return different shapes, so they
     are different steps: a run replayed after the key changed must not read
@@ -90,6 +105,9 @@ async def retire_stale_claims(ctx: inngest.Context) -> None:
     async def retire() -> int:
         now = datetime.now(UTC)
         async with get_session() as session:
+            current = await get_active_claims_for_article(session, original.article_id)
+            if not claims_predate_the_edit(failure, [claim.valid_from for claim in current]):
+                return 0
             await persist_article_claims(
                 session, article_id=original.article_id, claims=[], now=now
             )

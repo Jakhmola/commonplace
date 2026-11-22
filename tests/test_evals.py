@@ -3,6 +3,7 @@
 No Docker or keys needed.
 """
 
+import dataclasses
 import subprocess
 import sys
 from typing import Any
@@ -11,12 +12,14 @@ import pytest
 from pydantic import ValidationError
 
 from commonplace.agents.providers import ModelRefusal
-from commonplace.evals import calibration
+from commonplace.evals import benchmark, calibration
 from commonplace.evals.benchmark import (
     VARIANTS,
     load_benchmark,
     missing_expected,
+    scorable_cases,
     score_case,
+    suite_is_degraded,
     summarise,
 )
 from commonplace.evals.calibration import EVALUATORS, calibrate_deterministic, in_scope
@@ -26,6 +29,7 @@ from commonplace.evals.judges import (
     disagreement_judge,
     faithfulness_judge,
     format_judge_input,
+    judge_version,
     requires_disagreement_check,
 )
 from commonplace.evals.metrics import (
@@ -323,16 +327,73 @@ def _hits(*canonical_ids: str) -> list[dict[str, Any]]:
     return [{"passage_id": f"p{i}", "canonical_id": cid} for i, cid in enumerate(canonical_ids)]
 
 
-def test_a_case_is_scored_at_article_level() -> None:
+def test_a_case_is_scored_on_the_passages_that_would_reach_the_prompt() -> None:
     case = {"case_id": "c1", "category": "keyword", "expected_canonical_ids": ["pub:x:b"]}
-    # three passages of the same article take one position, not three
+    # the first k passages count; three from one article are one article
     scored = score_case(case, _hits("pub:x:a", "pub:x:a", "pub:x:a", "pub:x:b", "pub:x:c"), k=5)
     assert scored["retrieved_canonical_ids"] == ["pub:x:a", "pub:x:b", "pub:x:c"]
     assert (scored["recall_at_k"], scored["mrr"]) == (1.0, 0.5)
     assert (scored["case_id"], scored["category"]) == ("c1", "keyword")
-    # only the first k distinct articles count
-    deep = score_case(case, _hits("pub:x:a", "pub:x:c", "pub:x:b"), k=2)
-    assert (deep["recall_at_k"], deep["mrr"]) == (0.0, 0.0)
+    # found in review: an article whose first passage is the sixth never reaches the
+    # prompt, however few distinct articles came before it
+    crowded = _hits("pub:x:a", "pub:x:a", "pub:x:a", "pub:x:c", "pub:x:c", "pub:x:b")
+    late = score_case(case, crowded, k=5)
+    assert late["retrieved_canonical_ids"] == ["pub:x:a", "pub:x:c"]
+    assert (late["recall_at_k"], late["mrr"]) == (0.0, 0.0)
+
+
+def test_a_case_counts_how_many_of_its_passages_the_graph_found() -> None:
+    case = {"case_id": "c1", "category": "keyword", "expected_canonical_ids": ["pub:x:a"]}
+    hits = _hits("pub:x:a", "pub:x:b", "pub:x:c")
+    hits[0]["graph_rank"], hits[2]["graph_rank"] = 2, 1
+    assert score_case(case, hits, k=2)["graph_hits"] == 1  # the third is outside the prompt
+    assert score_case(case, _hits("pub:x:a"), k=2)["graph_hits"] == 0
+
+
+def test_a_case_is_scored_only_on_articles_that_are_in_the_corpus() -> None:
+    cases = [
+        {"case_id": "c1", "expected_canonical_ids": ["pub:x:a", "pub:x:gone"]},
+        {"case_id": "c2", "expected_canonical_ids": ["pub:x:gone"]},
+        {"case_id": "c3", "expected_canonical_ids": ["pub:x:a"]},
+    ]
+    scorable = scorable_cases(cases, missing=["pub:x:gone"])
+    # found in review: c2 used to be scored as a miss, and averaged in
+    assert [(c["case_id"], c["expected_canonical_ids"]) for c in scorable] == [
+        ("c1", ["pub:x:a"]),
+        ("c3", ["pub:x:a"]),
+    ]
+    assert scorable_cases(cases, missing=[]) == cases
+
+
+async def test_hybrid_variants_are_measured_through_the_search_that_answers_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def hybrid_search(_: Any, query: str, **kwargs: Any) -> tuple[list[Any], list[Any]]:
+        calls.append({"query": query, **kwargs})
+        return _hits("pub:x:a", "pub:x:b"), _hits("pub:x:a", "pub:x:b", "pub:x:c")
+
+    monkeypatch.setattr(benchmark, "hybrid_search", hybrid_search)
+    vector = [0.1, 0.2]
+    for variant in ("hybrid_2way_rrf_k60", "hybrid_3way_rrf_k60"):
+        hits = await benchmark.retrieve_variant(None, variant, "a question", vector, 5)  # type: ignore[arg-type]
+        assert [h["canonical_id"] for h in hits] == ["pub:x:a", "pub:x:b"]  # the top, not the pool
+    assert calls == [
+        {"query": "a question", "limit": 5, "query_embedding": vector, "use_graph": False},
+        {"query": "a question", "limit": 5, "query_embedding": vector, "use_graph": True},
+    ]
+
+
+def test_a_suite_whose_graph_leg_found_nothing_is_marked_degraded() -> None:
+    def result(graph_hits: int) -> dict[str, Any]:
+        return {"category": "keyword", "recall_at_k": 1.0, "mrr": 1.0, "graph_hits": graph_hits}
+
+    assert summarise([result(2), result(0)])["graph_hits"] == 2
+    assert suite_is_degraded(graph_status="ok", three_way_graph_hits=7) is False
+    # found in review: with Memgraph down the 3-way row silently repeated the 2-way row
+    assert suite_is_degraded(graph_status="error: ServiceUnavailable", three_way_graph_hits=7)
+    assert suite_is_degraded(graph_status="ok", three_way_graph_hits=0)
 
 
 def test_cases_pointing_at_missing_articles_are_reported() -> None:
@@ -467,3 +528,31 @@ async def test_in_calibration_a_refusal_counts_against_the_judge(
     report, verdicts = await calibration.calibrate_judge("faithfulness", [trace])
     assert (report.false_positives, report.tnr) == (1, 0.0)  # it did not clear a good answer
     assert "refus" in verdicts["t1"].critique
+
+
+# --- found in review of the evaluation phase ---
+
+
+def test_no_two_labelled_traces_give_a_judge_the_same_input() -> None:
+    # A trace perturbed only in its citations reads the same to a judge as the trace it
+    # was built from: counting both would count one judgement twice.
+    for evaluator in ("faithfulness", "disagreement"):
+        inputs: dict[str, str] = {}
+        for trace in load_labeled_traces():
+            if not in_scope(trace, evaluator):
+                continue
+            shown = format_judge_input(
+                question=trace["question"],
+                retrieved=trace["retrieved"],
+                answer_text=trace["answer_text"],
+            )
+            assert shown not in inputs, (evaluator, trace["trace_id"], inputs[shown])
+            inputs[shown] = trace["trace_id"]
+
+
+def test_a_verdict_records_which_judge_gave_it() -> None:
+    version = judge_version()
+    assert version.startswith(f"{faithfulness_judge.model}:")
+    assert judge_version() == version
+    reworded = dataclasses.replace(faithfulness_judge, system_prompt="A different prompt.")
+    assert judge_version((reworded, disagreement_judge)) != version

@@ -16,6 +16,7 @@ There is deliberately no rule-based stand-in: a keyword heuristic labelled
 "judge" would produce numbers that mean nothing.
 """
 
+import hashlib
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -68,6 +69,19 @@ disagreement_judge = _judge(
     "Does the answer hide a real disagreement between its sources?",
     DISAGREEMENT_JUDGE_SYSTEM_PROMPT,
 )
+
+
+def judge_version(
+    judges: tuple[Agent[BinaryVerdict], ...] = (faithfulness_judge, disagreement_judge),
+) -> str:
+    """`<model>:<hash of the prompts>`, stored with every verdict.
+
+    A verdict means what its judge meant. When a prompt or the model changes,
+    earlier verdicts were given by a different judge and should not be
+    averaged with new ones as if nothing had happened.
+    """
+    prompts = "\x00".join(judge.system_prompt for judge in judges)
+    return f"{judges[0].model}:{hashlib.sha256(prompts.encode()).hexdigest()[:8]}"
 
 
 def requires_disagreement_check(retrieved: list[dict[str, Any]], prompt_limit: int = 5) -> bool:

@@ -163,3 +163,10 @@ async def test_superseded_passages_and_claims_are_found(
     assert await get_superseded_ids(db, passage_ids=[old_passage], claim_ids=ids[1:]) == set(ids)
     # ids that are not uuids (or not known) are ignored, not an error
     assert await get_superseded_ids(db, passage_ids=["p1", "nope"], claim_ids=[]) == set()
+
+
+async def test_a_score_records_which_judge_gave_it(db: AsyncSession) -> None:
+    await _snapshot(db, "snap_evaltest_judge")
+    await upsert_eval_result(db, **_score("snap_evaltest_judge"), judge_version="a-model:1a2b3c4d")
+    report = await get_latest_eval_report(db)
+    assert report["answers"]["judge_versions"]["a-model:1a2b3c4d"] == 1

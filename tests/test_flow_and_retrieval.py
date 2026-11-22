@@ -11,6 +11,7 @@ import openai
 import pytest
 
 from commonplace import operations
+from commonplace.citations import cited_numbers
 from commonplace.functions import FUNCTIONS
 from commonplace.functions.ask import cited, format_context, synthesize
 from commonplace.functions.backfill import candidates, feed_pointers
@@ -241,6 +242,16 @@ def test_citations_in_lists_and_ranges_are_recognised() -> None:
         3,
     ]
     assert cited("Passage [10] does not exist, and 1 is not cited.", PASSAGES) == []
+
+
+def test_brackets_that_are_not_citations_do_not_break_the_parser() -> None:
+    # found in review: each of the first two raised ValueError, after the model had been paid
+    assert cited_numbers("Released on [2024-01-15], as [1] says.") == {1}
+    assert cited_numbers("A version string [1-2-3] is not a citation.") == set()
+    # A range that is backwards or implausibly wide is not expanded, but its ends
+    # still count as cited, so a check on citation bounds can see them.
+    assert cited_numbers("backwards [9-7], far apart [7-60]") == {7, 9, 60}
+    assert cited_numbers("[ 1 , 3-4 ]") == {1, 3, 4}
 
 
 class _LLM:

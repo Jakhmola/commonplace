@@ -38,7 +38,9 @@ from commonplace.evals.benchmark import (
     load_benchmark,
     missing_expected,
     retrieve_variant,
+    scorable_cases,
     score_case,
+    suite_is_degraded,
     summarise,
 )
 from commonplace.evals.deterministic import run_deterministic_checks
@@ -49,8 +51,10 @@ from commonplace.evals.judges import (
     disagreement_judge,
     faithfulness_judge,
     format_judge_input,
+    judge_version,
     requires_disagreement_check,
 )
+from commonplace.graph.client import check_memgraph_health
 from commonplace.inngest_client import client
 from commonplace.schemas.events import (
     ANSWER_EVALUATED,
@@ -118,7 +122,7 @@ async def score_answer(
     """Every evaluator applied to one answer, each as its own step.
 
     `{checks, faithfulness, disagreement, failure_codes, composite_score,
-    judge_usd}`. Used for answers from `/ask` and for research reports alike:
+    judge_usd, judge_version}`. Used for answers from `/ask` and for research reports alike:
     `retrieved` is everything that was found, with `in_prompt` on what the
     writer was shown.
     """
@@ -174,6 +178,7 @@ async def score_answer(
             checks["passed"], faithfulness["verdict"], disagreement["verdict"]
         ),
         "judge_usd": round(judge_usd, 6),
+        "judge_version": judge_version(),
     }
 
 
@@ -230,6 +235,7 @@ async def evaluate_answer(ctx: inngest.Context) -> dict[str, object]:
                 disagreement_critique=disagreement["critique"],
                 failure_codes=failure_codes,
                 composite_score=score,
+                judge_version=scores["judge_version"],
             )
             await session.commit()
         return str(eval_id)
@@ -270,10 +276,15 @@ async def run_eval_suite(ctx: inngest.Context) -> dict[str, object]:
         expected = {cid for case in benchmark["cases"] for cid in case["expected_canonical_ids"]}
         async with get_session() as session:
             stored = await get_existing_canonical_ids(session, sorted(expected))
-        return {**benchmark, "missing_expected": missing_expected(benchmark["cases"], stored)}
+        return {
+            **benchmark,
+            "missing_expected": missing_expected(benchmark["cases"], stored),
+            "graph_status": await check_memgraph_health(),
+        }
 
     benchmark = await ctx.step.run("load-benchmark", load)
-    cases: list[dict[str, Any]] = benchmark["cases"]
+    # A case is scored only on expected articles that are actually stored.
+    cases = scorable_cases(benchmark["cases"], benchmark["missing_expected"])
     k: int = benchmark["k"]
 
     async def embed_questions() -> dict[str, Any]:
@@ -300,11 +311,20 @@ async def run_eval_suite(ctx: inngest.Context) -> dict[str, object]:
         variants_summary[variant] = summarise(results)
         case_results.extend(results)
 
+    degraded = suite_is_degraded(
+        graph_status=benchmark["graph_status"],
+        three_way_graph_hits=variants_summary["hybrid_3way_rrf_k60"]["graph_hits"],
+    )
+
     async def persist() -> str:
         summary = {
             "variants": variants_summary,
             "k": k,
+            "cases_scored": len(cases),
             "missing_expected": benchmark["missing_expected"],
+            "graph_status": benchmark["graph_status"],
+            # True: the three-way variant ran without its graph leg and repeats the two-way one.
+            "degraded": degraded,
         }
         async with get_session() as session:
             run_id = await upsert_eval_run(
@@ -323,4 +343,5 @@ async def run_eval_suite(ctx: inngest.Context) -> dict[str, object]:
         "suite_name": payload.suite_name,
         "variants": variants_summary,
         "missing_expected": benchmark["missing_expected"],
+        "degraded": degraded,
     }

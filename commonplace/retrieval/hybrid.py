@@ -113,21 +113,27 @@ async def hybrid_search(
     limit: int = 5,
     fetch_multiplier: int = 3,
     k: int | None = None,
+    *,
+    query_embedding: list[float] | None = None,
+    use_graph: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """(the top `limit` passages, every fused candidate).
 
     Callers that only answer need the first; a snapshot keeps the second.
+    `query_embedding` and `use_graph` exist for the benchmark, which embeds
+    all its questions at once and compares the search with and without the
+    graph: it measures this function, not a copy of it.
     """
     per_engine = max(limit * fetch_multiplier, 15)
 
     # The question is embedded before the session is touched, so no connection
     # is held during the network call. If the embedding provider is down the
     # search degrades to keywords only instead of failing.
-    query_embedding: list[float] | None = None
-    try:
-        (query_embedding,) = (await embed_texts([query]))["embeddings"]
-    except Exception:
-        logger.exception("Could not embed the query; falling back to keyword search")
+    if query_embedding is None:
+        try:
+            (query_embedding,) = (await embed_texts([query]))["embeddings"]
+        except Exception:
+            logger.exception("Could not embed the query; falling back to keyword search")
 
     sparse_results = await search_passages_bm25(session, query, per_engine)
     dense_results = (
@@ -136,7 +142,11 @@ async def hybrid_search(
         else []
     )
 
-    graph_results = await search_graph_claims(session, query, settings.graph_retrieval_limit)
+    graph_results = (
+        await search_graph_claims(session, query, settings.graph_retrieval_limit)
+        if use_graph
+        else None
+    )
 
     fused = [
         asdict(c)

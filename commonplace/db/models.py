@@ -235,6 +235,8 @@ class EvalResult(Base):
     disagreement_critique: Mapped[str] = mapped_column(Text, nullable=False)
     failure_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     composite_score: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False, default=0.0)
+    # Which judge gave the verdicts: model and a hash of the prompts. NULL on old rows.
+    judge_version: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = _now()
 
 

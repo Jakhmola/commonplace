@@ -7,6 +7,7 @@ import asyncio
 import re
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -25,6 +26,7 @@ from commonplace.agents.roles.extractor import (
 from commonplace.functions import FUNCTIONS
 from commonplace.functions.ask import cited, format_context
 from commonplace.functions.enrich import (
+    claims_predate_the_edit,
     extract_claims,
     extraction_step_id,
     should_extract,
@@ -528,6 +530,19 @@ def test_a_failed_extraction_has_a_handler_that_retires_stale_claims() -> None:
     # a first extraction that fails leaves nothing stale behind
     assert should_retire_claims({"event": {"name": "cp/article.ingested"}}) is False
     assert should_retire_claims({}) is False
+
+
+def test_claims_stored_by_the_failed_run_itself_are_not_retired() -> None:
+    edited = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
+    failure = {"event": {"name": "cp/article.updated", "ts": int(edited.timestamp() * 1000)}}
+    before, after = edited - timedelta(days=3), edited + timedelta(seconds=40)
+    # the run failed before it stored anything: the current claims quote the old text
+    assert claims_predate_the_edit(failure, [before, before]) is True
+    # found in review: the run stored new claims and failed in a later step. They are current.
+    assert claims_predate_the_edit(failure, [after, after]) is False
+    assert claims_predate_the_edit(failure, []) is False
+    # an event without a timestamp: assume the claims are stale, as before
+    assert claims_predate_the_edit({"event": {"name": "cp/article.updated"}}, [after]) is True
 
 
 def test_the_model_and_the_stand_in_are_different_steps() -> None:
