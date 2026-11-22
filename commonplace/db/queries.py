@@ -8,7 +8,7 @@ from sqlalchemy import Row, Select, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from commonplace.db.models import Article, Cost, Job, Passage, Publication, Snapshot
+from commonplace.db.models import Article, Cost, Cursor, Job, Passage, Publication, Snapshot
 
 # --- publications ---
 
@@ -34,6 +34,51 @@ async def get_publication_by_slug(session: AsyncSession, slug: str) -> Publicati
 
 async def list_publications(session: AsyncSession) -> list[Publication]:
     return list((await session.execute(select(Publication).order_by(Publication.slug))).scalars())
+
+
+# --- polling cursors ---
+
+
+async def get_cursor(session: AsyncSession, publication_id: uuid.UUID) -> Cursor | None:
+    return await session.get(Cursor, publication_id)
+
+
+async def record_poll(
+    session: AsyncSession, *, publication_id: uuid.UUID, not_modified: bool
+) -> None:
+    """Count one poll of a feed, and whether it found the feed unchanged."""
+    unchanged = 1 if not_modified else 0
+    stmt = (
+        insert(Cursor)
+        .values(
+            publication_id=publication_id,
+            last_checked_at=func.now(),
+            poll_count=1,
+            not_modified_count=unchanged,
+        )
+        .on_conflict_do_update(
+            index_elements=[Cursor.publication_id],
+            set_={
+                "last_checked_at": func.now(),
+                "poll_count": Cursor.poll_count + 1,
+                "not_modified_count": Cursor.not_modified_count + unchanged,
+            },
+        )
+    )
+    await session.execute(stmt)
+
+
+async def save_validators(
+    session: AsyncSession,
+    *,
+    publication_id: uuid.UUID,
+    etag: str | None,
+    last_modified: str | None,
+) -> None:
+    """Remember the feed version we have fully dealt with. The cursor row must exist."""
+    cursor = await session.get(Cursor, publication_id)
+    if cursor is not None:
+        cursor.etag, cursor.last_modified = etag, last_modified
 
 
 # --- articles and passages ---

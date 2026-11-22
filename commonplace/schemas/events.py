@@ -12,11 +12,12 @@ import inngest
 from pydantic import BaseModel
 
 PUBLICATION_ADDED = "cp/publication.added"
+FEED_POLL = "cp/feed.poll"
 ARTICLE_DISCOVERED = "cp/article.discovered"
 ARTICLE_INGESTED = "cp/article.ingested"
 ANSWER_PRODUCED = "cp/answer.produced"
 
-DiscoverySource = Literal["rss", "backfill", "manual"]
+DiscoverySource = Literal["rss", "backfill", "manual", "poll"]
 
 
 class PublicationAdded(BaseModel):
@@ -24,6 +25,12 @@ class PublicationAdded(BaseModel):
 
     feed_url: str
     name: str | None = None
+
+
+class FeedPoll(BaseModel):
+    """Anyone -> poller. Check feeds now instead of waiting for the schedule."""
+
+    publication: str | None = None  # a slug, or None for every feed
 
 
 class ArticleDiscovered(BaseModel):

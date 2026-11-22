@@ -52,7 +52,8 @@ def test_no_idempotency_key_so_an_article_can_be_resent() -> None:
 
 def test_backfill_listens_for_added_publications() -> None:
     ids = {f.get_config("http://localhost:8000").main.id for f in FUNCTIONS}
-    assert ids == {"commonplace-backfill-publication", "commonplace-ingest-article"}
+    assert {"commonplace-backfill-publication", "commonplace-ingest-article"} <= ids
+    assert "commonplace-add-publication" not in ids  # both would react to the same event
 
 
 # --- hybrid retrieval: fuse two rankings by position, never by score ---

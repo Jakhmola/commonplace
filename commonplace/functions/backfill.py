@@ -23,6 +23,7 @@ from commonplace.schemas.events import (
     ARTICLE_DISCOVERED,
     PUBLICATION_ADDED,
     ArticleDiscovered,
+    DiscoverySource,
     PublicationAdded,
 )
 from commonplace.schemas.ids import canonical_id
@@ -44,7 +45,10 @@ def feed_pointers(raw: bytes) -> list[dict[str, Any]]:
 
 
 def candidates(
-    pointers: list[dict[str, Any]], pub: PublicationEntry, publication_id: uuid.UUID
+    pointers: list[dict[str, Any]],
+    pub: PublicationEntry,
+    publication_id: uuid.UUID,
+    via: DiscoverySource = "backfill",
 ) -> list[ArticleDiscovered]:
     """One candidate per identifiable post.
 
@@ -68,7 +72,7 @@ def candidates(
                 title=entry.title,
                 author=entry.author,
                 published_at=entry.published_at,
-                via="backfill",
+                via=via,
             ),
         )
     return list(found.values())

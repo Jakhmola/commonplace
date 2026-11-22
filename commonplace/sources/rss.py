@@ -5,6 +5,7 @@ the page, so every article is parsed the same way.
 """
 
 import calendar
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import feedparser
@@ -31,6 +32,47 @@ async def fetch_feed(feed_url: str) -> bytes:
         response = await client.get(feed_url)
         response.raise_for_status()
         return response.content
+
+
+@dataclass
+class FeedResponse:
+    status: int  # 200 or 304
+    content: bytes | None  # None when the feed has not changed
+    etag: str | None
+    last_modified: str | None
+
+
+async def fetch_feed_conditional(
+    feed_url: str, etag: str | None = None, last_modified: str | None = None
+) -> FeedResponse:
+    """Ask for the feed only if it changed since the validators we hold.
+
+    A server that supports conditional requests answers 304 with no body, so
+    polling an unchanged feed costs one small round trip and no parsing. A
+    server that does not simply answers 200 every time.
+    """
+    conditions = {}
+    if etag:
+        conditions["If-None-Match"] = etag
+    if last_modified:
+        conditions["If-Modified-Since"] = last_modified
+
+    async with httpx.AsyncClient(
+        headers={"User-Agent": settings.user_agent},
+        timeout=settings.request_timeout_s,
+        follow_redirects=True,
+    ) as client:
+        response = await client.get(feed_url, headers=conditions)
+
+    if response.status_code == 304:
+        return FeedResponse(304, None, etag, last_modified)
+    response.raise_for_status()
+    return FeedResponse(
+        200,
+        response.content,
+        response.headers.get("ETag") or etag,
+        response.headers.get("Last-Modified") or last_modified,
+    )
 
 
 def parse_feed(raw: bytes) -> list[FeedEntry]:
