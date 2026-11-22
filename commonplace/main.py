@@ -133,6 +133,25 @@ async def add_article(payload: ArticleManual) -> dict[str, Any]:
     }
 
 
+def job_state(job: dict[str, Any] | None, run_status: str | None, failures: list[str]) -> str:
+    """One lowercase word for a job: queued, running, completed or failed."""
+    if failures or run_status == "Cancelled":
+        return "failed"
+    if job is not None:
+        return str(job["status"])
+    # No job row yet: the function has not reached the step that writes it.
+    return {"Completed": "completed", None: "queued"}.get(run_status, "running")
+
+
+async def _event_exists(event_id: str) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            response = await http.get(f"{settings.inngest_base_url}/v1/events/{event_id}")
+    except httpx.HTTPError:
+        return False
+    return response.status_code == 200
+
+
 @app.get("/jobs/{event_id}")
 async def job_status(event_id: str) -> dict[str, Any]:
     """Our own job row (article counts) combined with Inngest's status for the run."""
@@ -142,11 +161,14 @@ async def job_status(event_id: str) -> dict[str, Any]:
         job = await get_job_status(session, event_id)
         await session.commit()  # keeps the recounted done/status
 
-    if job is None and run_status is None:
+    # Right after a POST the event exists but its run may not have started yet.
+    if job is None and run_status is None and not await _event_exists(event_id):
         raise HTTPException(404, f"No job or Inngest run found for event_id={event_id!r}.")
 
     return {
-        "status": "failed" if failures else (job["status"] if job else run_status),
+        # An article whose ingest fails for good is not counted here yet, so its
+        # job stays "running"; recording failed runs is what closes that gap.
+        "status": job_state(job, run_status, failures),
         "articles_done": job["done"] if job else None,
         "articles_total": job["total"] if job else None,
         "run_status": run_status,

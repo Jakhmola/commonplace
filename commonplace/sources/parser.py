@@ -19,8 +19,8 @@ class ParsedArticle(BaseModel):
 def parse_html(html: str, url: str, *, fallback_published_at: datetime) -> ParsedArticle:
     """Main text with nav, subscribe prompts and footer removed.
 
-    The page's own date wins; `fallback_published_at` (the feed's date) is
-    used only when the page has none.
+    The page's own date wins over `fallback_published_at` (the feed's date)
+    when the two disagree about the day.
     """
     text = trafilatura.extract(
         html, url=url, include_comments=False, include_tables=False, favor_precision=True
@@ -32,7 +32,11 @@ def parse_html(html: str, url: str, *, fallback_published_at: datetime) -> Parse
     published_at = fallback_published_at
     if meta and meta.date:
         with contextlib.suppress(ValueError):
-            published_at = datetime.fromisoformat(meta.date).replace(tzinfo=UTC)
+            page_date = datetime.fromisoformat(meta.date).replace(tzinfo=UTC)
+            # The page only knows the day. When it agrees with the feed, the
+            # feed's timestamp is the same date with the time of day intact.
+            if page_date.date() != fallback_published_at.astimezone(UTC).date():
+                published_at = page_date
 
     return ParsedArticle(
         title=(meta.title if meta and meta.title else url),

@@ -21,6 +21,8 @@ from commonplace.config import settings
 from commonplace.db.queries import insert_cost
 from commonplace.db.session import get_session
 
+logger = logging.getLogger(__name__)
+
 _USAGE_KEYS = {"model", "input_tokens", "output_tokens", "est_usd"}
 
 
@@ -42,16 +44,21 @@ class CostCaptureMiddleware(inngest.Middleware):
         if usage is None:
             return
         article_id = usage.get("article_id")
-        async with get_session() as session:
-            await insert_cost(
-                session,
-                model=usage["model"],
-                input_tokens=usage["input_tokens"],
-                output_tokens=usage["output_tokens"],
-                est_usd=usage["est_usd"],
-                article_id=uuid.UUID(article_id) if article_id else None,
-            )
-            await session.commit()
+        try:
+            async with get_session() as session:
+                await insert_cost(
+                    session,
+                    model=usage["model"],
+                    input_tokens=usage["input_tokens"],
+                    output_tokens=usage["output_tokens"],
+                    est_usd=usage["est_usd"],
+                    article_id=uuid.UUID(article_id) if article_id else None,
+                )
+                await session.commit()
+        except Exception:
+            # Bookkeeping must never fail the step: an exception here would make
+            # Inngest discard the step's output and run the paid call again.
+            logger.exception("Could not record cost %s", usage)
 
 
 client = inngest.Inngest(

@@ -31,7 +31,47 @@ from commonplace.sources.allowlist import (
     find_publication_for_url,
     load_publications,
 )
-from commonplace.sources.rss import fetch_feed, parse_feed
+from commonplace.sources.rss import FeedEntry, fetch_feed, parse_feed
+
+
+def feed_pointers(raw: bytes) -> list[dict[str, Any]]:
+    """What the `fetch-feed` step hands on: title, link, author and date per entry.
+
+    Never the raw feed. Feeds carry whole post bodies, and a step's output is
+    capped at 4 MB: one feed here was already 2.9 MB.
+    """
+    return [entry.model_dump(mode="json") for entry in parse_feed(raw)]
+
+
+def candidates(
+    pointers: list[dict[str, Any]], pub: PublicationEntry, publication_id: uuid.UUID
+) -> list[ArticleDiscovered]:
+    """One candidate per identifiable post.
+
+    An entry whose link has no post slug (a feed item pointing at the homepage)
+    is skipped rather than failing the whole backfill, and when two links end
+    in the same slug the first one wins, so the job's total stays reachable.
+    """
+    found: dict[str, ArticleDiscovered] = {}
+    for pointer in pointers:
+        entry = FeedEntry.model_validate(pointer)
+        try:
+            cid = canonical_id(pub.slug, entry.url)
+        except ValueError:
+            continue
+        found.setdefault(
+            cid,
+            ArticleDiscovered(
+                canonical_id=cid,
+                publication_id=publication_id,
+                url=entry.url,
+                title=entry.title,
+                author=entry.author,
+                published_at=entry.published_at,
+                via="backfill",
+            ),
+        )
+    return list(found.values())
 
 
 @client.create_function(
@@ -53,10 +93,10 @@ async def backfill_publication(ctx: inngest.Context) -> dict[str, int]:
 
     pub = PublicationEntry.model_validate(await ctx.step.run("match-allowlist", match_allowlist))
 
-    async def fetch() -> str:
-        return (await fetch_feed(pub.feed_url)).decode("utf-8", errors="replace")
+    async def fetch() -> list[dict[str, Any]]:
+        return feed_pointers(await fetch_feed(pub.feed_url))
 
-    feed_text = await ctx.step.run("fetch-feed", fetch)
+    pointers = await ctx.step.run("fetch-feed", fetch)
 
     async def save_publication() -> str:
         async with get_session() as session:
@@ -69,21 +109,10 @@ async def backfill_publication(ctx: inngest.Context) -> dict[str, int]:
     publication_id = uuid.UUID(await ctx.step.run("upsert-publication", save_publication))
 
     async def find_new_articles() -> list[dict[str, Any]]:
-        candidates = [
-            ArticleDiscovered(
-                canonical_id=canonical_id(pub.slug, entry.url),
-                publication_id=publication_id,
-                url=entry.url,
-                title=entry.title,
-                author=entry.author,
-                published_at=entry.published_at,
-                via="backfill",
-            )
-            for entry in parse_feed(feed_text.encode())
-        ]
+        found = candidates(pointers, pub, publication_id)
         async with get_session() as session:
-            stored = await get_existing_canonical_ids(session, [c.canonical_id for c in candidates])
-            new = [c for c in candidates if c.canonical_id not in stored]
+            stored = await get_existing_canonical_ids(session, [c.canonical_id for c in found])
+            new = [c for c in found if c.canonical_id not in stored]
             # The job row is written before anything is queued, so progress can
             # be read from the moment the first article lands.
             await create_job(

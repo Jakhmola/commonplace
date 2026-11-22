@@ -1,5 +1,7 @@
 """Unit tests for flow control, hybrid retrieval and answers. No Docker or keys needed."""
 
+import json
+import uuid
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,6 +11,7 @@ import pytest
 
 from commonplace.functions import FUNCTIONS
 from commonplace.functions.ask import cited, format_context, synthesize
+from commonplace.functions.backfill import candidates, feed_pointers
 from commonplace.functions.ingest import ingest_article
 from commonplace.main import resolve_manual_article
 from commonplace.retrieval.hybrid import compute_rrf
@@ -181,3 +184,34 @@ async def test_llm_failure_becomes_the_answer_text() -> None:
     answer = await synthesize(_FailingLLM(), "What is throttling?", PASSAGES)  # type: ignore[arg-type]
     assert answer.startswith("LLM synthesis failed (APIConnectionError)")
     assert cited(answer, PASSAGES) == []  # a failed answer cites nothing
+
+
+# --- backfill: what the feed step hands on, and which entries become articles ---
+
+
+def test_the_feed_step_passes_on_pointers_not_post_bodies() -> None:
+    body = "<p>" + "a very long post " * 60_000 + "</p>"  # about 1 MB of content
+    feed = f"""<?xml version="1.0"?>
+    <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel>
+      <item><title>Long post</title><link>https://www.latent.space/p/long-post</link>
+        <pubDate>Tue, 17 Nov 2026 09:48:40 GMT</pubDate>
+        <content:encoded><![CDATA[{body}]]></content:encoded></item>
+    </channel></rss>""".encode()
+    (pointer,) = feed_pointers(feed)
+    assert pointer["url"] == "https://www.latent.space/p/long-post"
+    assert len(json.dumps(pointer)) < 500  # a step output is capped at 4 MB
+
+
+def test_backfill_skips_entries_it_cannot_identify_and_duplicate_ids() -> None:
+    def entry(url: str) -> dict[str, Any]:
+        return {"title": "t", "url": url, "author": None, "published_at": "2026-11-17T00:00:00Z"}
+
+    pointers = [
+        entry("https://magazine.sebastianraschka.com/p/a-post"),
+        entry("https://magazine.sebastianraschka.com/"),  # the homepage: no post slug
+        entry("https://magazine.sebastianraschka.com/podcast/a-post"),  # same id as the first
+        entry("https://magazine.sebastianraschka.com/p/b-post"),
+    ]
+    found = candidates(pointers, AHEAD_OF_AI, uuid.uuid4())
+    assert [c.canonical_id for c in found] == ["pub:ahead-of-ai:a-post", "pub:ahead-of-ai:b-post"]
+    assert found[0].url.endswith("/p/a-post") and found[0].via == "backfill"

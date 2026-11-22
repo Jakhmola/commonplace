@@ -70,9 +70,15 @@ async def ingest_article(ctx: inngest.Context) -> dict[str, object]:
     await ctx.step.run("check-allowlist", check_allowlist)
 
     async def fetch_html() -> dict[str, object]:
+        publications = load_publications()
+
+        def stay_on_allowlist(url: str) -> None:
+            assert_allowed(url, publications)
+
         try:
-            page = await fetch_article(payload.url)
-        except FetchError as exc:
+            # Checked for every hop, so a redirect cannot lead off the allowlist.
+            page = await fetch_article(payload.url, check_url=stay_on_allowlist)
+        except (FetchError, ValueError) as exc:
             raise inngest.NonRetriableError(str(exc)) from exc
         return {"url": page.url, "html": page.html, "status_code": page.status_code}
 

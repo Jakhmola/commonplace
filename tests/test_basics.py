@@ -7,16 +7,25 @@ No Docker, database, Inngest or API key needed:
 
 import hashlib
 from array import array
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any
 
+import httpx
+import inngest
 import pytest
+import respx
 
+from commonplace import inngest_client
 from commonplace.inngest_client import usage_from_output
-from commonplace.main import run_summary
+from commonplace.main import job_state, run_summary
 from commonplace.schemas.ids import canonical_id, normalize_url
 from commonplace.sources.allowlist import PublicationEntry, assert_allowed
 from commonplace.sources.chunking import chunk_text
 from commonplace.sources.embedder import pack, unpack
+from commonplace.sources.fetcher import FetchError, fetch_article
 from commonplace.sources.parser import parse_html
 from commonplace.sources.rss import parse_feed
 
@@ -215,3 +224,79 @@ def test_a_failed_run_reports_its_message_without_the_stack_trace() -> None:
     no_output = {"status": "Failed", "ended_at": "2026-11-22T20:14:45Z", "output": None}
     assert run_summary([no_output]) == ("Failed", ["unknown error"])
     assert run_summary([]) == (None, [])
+
+
+async def test_a_failed_cost_write_does_not_fail_the_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    # If recording the cost raised, Inngest would discard the step's output and
+    # run the paid call again.
+    @asynccontextmanager
+    async def database_is_down() -> AsyncIterator[None]:
+        raise ConnectionError("database is down")
+        yield
+
+    monkeypatch.setattr(inngest_client, "get_session", database_is_down)
+    usage = {"model": "m", "input_tokens": 10, "output_tokens": 0, "est_usd": 0.0001}
+    step: Any = SimpleNamespace(id="embed")  # the middleware only checks that a step ran
+    result = inngest.TransformOutputResult(error=None, output={"usage": usage}, step=step)
+    middleware = inngest_client.CostCaptureMiddleware(inngest_client.client, raw_request=None)
+    await middleware.transform_output(result)  # must not raise
+    assert result.output == {"usage": usage}
+
+
+# --- fetching: stay on the allowlist, treat a throttled robots.txt as temporary ---
+
+
+@respx.mock
+async def test_a_redirect_off_the_allowlist_is_never_followed() -> None:
+    respx.get("https://www.latent.space/robots.txt").respond(404)
+    respx.get("https://www.latent.space/p/moved").respond(
+        302, headers={"location": "https://elsewhere.example/landing"}
+    )
+    elsewhere = respx.get("https://elsewhere.example/landing").respond(200, text="<p>hi</p>")
+
+    def only_latent_space(url: str) -> None:
+        assert_allowed(url, [LATENT_SPACE])
+
+    with pytest.raises(ValueError, match="outside the allowlist"):
+        await fetch_article("https://www.latent.space/p/moved", check_url=only_latent_space)
+    assert not elsewhere.called
+
+
+@respx.mock
+async def test_a_throttled_robots_txt_is_retried_not_cached_as_allow_all() -> None:
+    robots = respx.get("https://throttled.example/robots.txt")
+    robots.respond(429)
+    page = respx.get("https://throttled.example/p/a").respond(200, text="<p>hi</p>")
+    with pytest.raises(httpx.HTTPStatusError):
+        await fetch_article("https://throttled.example/p/a")
+    assert not page.called
+    robots.respond(200, text="User-agent: *\nDisallow: /p/")
+    with pytest.raises(FetchError, match="robots.txt disallows"):
+        await fetch_article("https://throttled.example/p/a")
+
+
+# --- dates, chunks and job states found in review ---
+
+
+def test_the_feed_timestamp_is_kept_when_the_page_only_knows_the_day() -> None:
+    feed_time = datetime(2026, 11, 17, 9, 48, 40, tzinfo=UTC)
+    article = parse_html(PAGE, "https://www.latent.space/p/x", fallback_published_at=feed_time)
+    assert article.published_at == feed_time
+
+
+def test_a_very_long_token_does_not_produce_redundant_chunks() -> None:
+    prose = " ".join(f"word{i:02d}" for i in range(60))
+    text = f"{prose} {'x' * 900} tail"
+    chunks = chunk_text(text, chunk_size=1000, chunk_overlap=150)
+    for previous, chunk in zip(chunks, chunks[1:], strict=False):
+        assert chunk not in previous  # every chunk adds text the one before lacked
+    assert "x" * 900 in "".join(chunks) and chunks[-1].endswith("tail")
+
+
+def test_job_state_is_lowercase_and_cancelled_counts_as_failed() -> None:
+    assert job_state(None, "Running", []) == "running"
+    assert job_state(None, "Cancelled", []) == "failed"
+    assert job_state(None, None, []) == "queued"  # the event exists, its run has not started
+    assert job_state({"status": "running"}, "Completed", []) == "running"
+    assert job_state({"status": "completed"}, "Completed", []) == "completed"
+    assert job_state({"status": "running"}, "Failed", ["boom"]) == "failed"
