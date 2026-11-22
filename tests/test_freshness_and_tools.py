@@ -161,11 +161,18 @@ def test_the_failure_handler_listens_to_inngest_itself() -> None:
 
 # --- MCP: the knowledge base as tools for an agent ---
 
-READ_TOOLS = {"cp_health", "cp_search", "cp_ask", "cp_job_status", "cp_list_publications"}
+READ_TOOLS = {
+    "cp_health",
+    "cp_search",
+    "cp_ask",
+    "cp_job_status",
+    "cp_list_publications",
+    "cp_sources",
+}
 TRIGGER_TOOLS = {"cp_add_publication", "cp_backfill", "cp_sync"}
 
 
-async def test_the_server_registers_the_eight_tools() -> None:
+async def test_the_server_registers_the_nine_tools() -> None:
     names = {tool.name for tool in await mcp.list_tools()}
     assert names == READ_TOOLS | TRIGGER_TOOLS
     assert all(tool.description for tool in await mcp.list_tools())  # an agent reads these
@@ -246,3 +253,8 @@ async def test_inngest_being_down_on_a_write_is_a_bad_gateway(
     with pytest.raises(operations.OperationError) as raised:
         await operations.queue_publication(FEED_URL)
     assert raised.value.status == 502
+
+
+async def test_a_bad_source_id_is_a_tool_error() -> None:
+    with pytest.raises(ToolError, match="Not a valid id"):
+        await tools.cp_sources("not-a-uuid")

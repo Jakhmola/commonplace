@@ -31,6 +31,7 @@ for _read in (
     tools.cp_health,
     tools.cp_search,
     tools.cp_ask,
+    tools.cp_sources,
     tools.cp_job_status,
     tools.cp_list_publications,
 ):

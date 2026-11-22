@@ -1,10 +1,11 @@
-"""Hybrid retrieval: keyword search and vector search, fused by rank.
+"""Hybrid retrieval: keyword search, vector search and the claim graph, fused by rank.
 
-Neither is enough alone. Full-text search finds exact tokens (a function
-name, a version string) and misses paraphrases; vector search understands
-meaning and blurs exact tokens. Reciprocal Rank Fusion merges the two lists
-using only each passage's position in each list, so two scores that live on
-different scales are never added together.
+None is enough alone. Full-text search finds exact tokens (a function name, a
+version string) and misses paraphrases. Vector search understands meaning and
+blurs exact tokens. The graph connects claims from different publications
+through shared topics and has no notion of similarity at all. Reciprocal Rank
+Fusion merges the three lists using only each passage's position in each list,
+so scores that live on different scales, or do not exist, are never added.
 """
 
 import logging
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from commonplace.config import settings
 from commonplace.db.queries import search_passages_bm25, search_passages_dense
+from commonplace.retrieval.graph import search_graph_claims
 from commonplace.sources.embedder import embed_texts
 
 logger = logging.getLogger(__name__)
@@ -33,17 +35,39 @@ class RetrievedCandidate:
     sparse_score: float | None = None
     dense_rank: int | None = None
     dense_score: float | None = None
-    source: str = "bm25"  # "bm25", "vector" or "both"
+    graph_rank: int | None = None
+    # The claim that led the graph to this passage, if it was reached that way.
+    claim_id: str | None = None
+    claim_text: str | None = None
+    claim_type: str | None = None
+    # Which engines found it: bm25, vector, both, graph, bm25+graph, vector+graph or all.
+    source: str = "bm25"
+
+
+def _source(c: RetrievedCandidate) -> str:
+    text_engines = {(True, True): "both", (True, False): "bm25", (False, True): "vector"}.get(
+        (c.sparse_rank is not None, c.dense_rank is not None)
+    )
+    if c.graph_rank is None:
+        return text_engines or "bm25"
+    if text_engines is None:
+        return "graph"
+    return "all" if text_engines == "both" else f"{text_engines}+graph"
 
 
 def compute_rrf(
-    sparse_results: list[dict[str, Any]], dense_results: list[dict[str, Any]], k: int = 60
+    sparse_results: list[dict[str, Any]],
+    dense_results: list[dict[str, Any]],
+    graph_results: list[dict[str, Any]] | None = None,
+    k: int = 60,
 ) -> list[RetrievedCandidate]:
     """score = sum over the engines that returned the passage of 1 / (k + rank).
 
-    A passage both engines found collects points twice, so agreement between
-    two very different engines beats being the favourite of one. Ties break
-    on passage id, so the same question always gives the same order.
+    A passage found by several engines collects points from each, so agreement
+    between very different engines beats being the favourite of one. Only
+    positions are used: the graph has no similarity score at all, and it still
+    fuses cleanly. Ties break on passage id, so the same question always gives
+    the same order.
     """
     candidates: dict[str, RetrievedCandidate] = {}
 
@@ -61,8 +85,23 @@ def compute_rrf(
         c = candidate(hit)
         c.dense_rank, c.dense_score = rank, float(hit["rank"])
         c.rrf_score += 1 / (k + rank)
-        c.source = "both" if c.sparse_rank is not None else "vector"
+    # Several claims can be quoted from one passage. It takes one position in the
+    # graph ranking, with the best-ranked of those claims.
+    by_passage: dict[str, dict[str, Any]] = {}
+    for hit in graph_results or []:
+        by_passage.setdefault(hit["passage_id"], hit)
+    for rank, hit in enumerate(by_passage.values(), start=1):
+        c = candidate(hit)
+        c.graph_rank = rank
+        c.claim_id, c.claim_text, c.claim_type = (
+            hit.get("claim_id"),
+            hit.get("claim_text"),
+            hit.get("claim_type"),
+        )
+        c.rrf_score += 1 / (k + rank)
 
+    for c in candidates.values():
+        c.source = _source(c)
     return sorted(candidates.values(), key=lambda c: (-c.rrf_score, c.passage_id))
 
 
@@ -95,7 +134,12 @@ async def hybrid_search(
         else []
     )
 
-    fused = [asdict(c) for c in compute_rrf(sparse_results, dense_results, k or settings.rrf_k)]
+    graph_results = await search_graph_claims(session, query, settings.graph_retrieval_limit)
+
+    fused = [
+        asdict(c)
+        for c in compute_rrf(sparse_results, dense_results, graph_results, k or settings.rrf_k)
+    ]
     return fused[:limit], fused
 
 

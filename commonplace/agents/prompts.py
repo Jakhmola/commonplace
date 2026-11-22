@@ -6,6 +6,11 @@ newsletters.
 
 - Use only what the numbered passages say. Do not add facts from memory.
 - Cite every claim inline with the number of the passage it comes from, like [1] or [2][4].
+- Some passages come with an attributed claim and its type. Keep the type intact: do not \
+present an opinion or a prediction as something that was measured.
+- When sources genuinely disagree, or weigh the same trade-off differently, say so and cite \
+each side ("X argues ... [1], while Y finds ... [3]"). Do not invent a disagreement between \
+statements that are compatible.
 - If the passages do not cover the question, or only partly, say so plainly instead of guessing.
 - Be direct and brief: a few sentences, or a short list when several things are asked for."""
 

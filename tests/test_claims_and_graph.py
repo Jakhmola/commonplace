@@ -20,6 +20,7 @@ from commonplace.agents.roles.extractor import (
     heuristic_extract_claims,
 )
 from commonplace.functions import FUNCTIONS
+from commonplace.functions.ask import cited, format_context
 from commonplace.functions.enrich import extract_claims
 from commonplace.graph import cypher
 from commonplace.graph.ontology import (
@@ -30,6 +31,9 @@ from commonplace.graph.ontology import (
     normalize_topics,
     slugify,
 )
+from commonplace.retrieval import graph as graph_retrieval
+from commonplace.retrieval.graph import extract_query_seed_topics
+from commonplace.retrieval.hybrid import compute_rrf
 from commonplace.schemas.entities import ClaimExtractionBatch, RawExtractedClaim
 from commonplace.schemas.events import CLAIMS_EXTRACTED, ClaimsExtracted
 from commonplace.schemas.ids import claim_id
@@ -327,3 +331,116 @@ def test_claims_extracted_summarises_the_guardrail() -> None:
         "claim_count": 6,
         "dropped_spans": 2,
     }
+
+
+# --- the graph as a third retriever ---
+
+
+def _passage(passage_id: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "passage_id": passage_id,
+        "text": f"text of {passage_id}",
+        "title": "A post",
+        "author": "Jane Writer",
+        "url": "https://www.latent.space/p/a-post",
+        "published_at": "2026-11-17T00:00:00+00:00",
+        "rank": 0.5,
+        **extra,
+    }
+
+
+def test_three_way_fusion_rewards_agreement_across_all_engines() -> None:
+    fused = compute_rrf(
+        [_passage("only-sparse"), _passage("everywhere")],
+        [_passage("only-dense"), _passage("everywhere")],
+        [_passage("only-graph"), _passage("everywhere")],
+    )
+    best = fused[0]
+    assert (best.passage_id, best.source) == ("everywhere", "all")
+    assert best.rrf_score == pytest.approx(3 / 62)  # second in each of three lists
+    assert (best.sparse_rank, best.dense_rank, best.graph_rank) == (2, 2, 2)
+    assert [c.passage_id for c in fused[1:]] == ["only-dense", "only-graph", "only-sparse"]
+
+
+def test_sources_are_labelled_by_the_engines_that_found_them() -> None:
+    fused = compute_rrf(
+        [_passage("s"), _passage("sd"), _passage("sg"), _passage("sdg")],
+        [_passage("d"), _passage("sd"), _passage("dg"), _passage("sdg")],
+        [_passage("g"), _passage("sg"), _passage("dg"), _passage("sdg")],
+    )
+    assert {c.passage_id: c.source for c in fused} == {
+        "s": "bm25",
+        "d": "vector",
+        "g": "graph",
+        "sd": "both",
+        "sg": "bm25+graph",
+        "dg": "vector+graph",
+        "sdg": "all",
+    }
+
+
+def test_a_graph_hit_brings_its_claim_to_an_existing_candidate() -> None:
+    claim = {"claim_id": "c-1", "claim_text": "Steps are memoized", "claim_type": "measurement"}
+    second_claim = {"claim_id": "c-2", "claim_text": "Another", "claim_type": "opinion"}
+    fused = compute_rrf(
+        [_passage("p1")],
+        [],
+        # two claims quoted from the same passage: the passage counts once, first claim kept
+        [_passage("p1", **claim), _passage("p1", **second_claim), _passage("p2", **second_claim)],
+    )
+    by_id = {c.passage_id: c for c in fused}
+    assert (by_id["p1"].claim_id, by_id["p1"].claim_type) == ("c-1", "measurement")
+    assert (by_id["p1"].sparse_rank, by_id["p1"].graph_rank) == (1, 1)
+    assert by_id["p1"].rrf_score == pytest.approx(2 / 61)
+    assert (by_id["p2"].source, by_id["p2"].claim_text, by_id["p2"].graph_rank) == (
+        "graph",
+        "Another",
+        2,
+    )
+
+
+def test_two_way_fusion_still_works_without_a_graph() -> None:
+    fused = compute_rrf([_passage("a")], [_passage("a")])
+    assert (fused[0].source, fused[0].graph_rank, fused[0].claim_id) == ("both", None, None)
+
+
+def test_seed_topics_come_from_aliases_and_phrases() -> None:
+    slugs, terms = extract_query_seed_topics(
+        "How do RAG and fine-tuning compare for coding agents in production?"
+    )
+    assert {"rag", "fine-tuning", "coding-agent"} <= set(slugs)
+    assert "large-language-model" not in slugs and "llm" not in slugs
+    assert not {"how", "do", "and", "for", "in"} & set(terms)
+    assert {"rag", "coding", "agents"} <= set(terms)
+
+    slugs, _ = extract_query_seed_topics("What do authors say about large language models?")
+    assert "llm" in slugs  # a multi-word alias resolves to its canonical topic
+    assert extract_query_seed_topics("what is it about?") == ([], [])
+
+
+async def test_graph_leg_failure_degrades_to_two_way(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def memgraph_is_down(**_: Any) -> list[dict[str, Any]]:
+        raise ConnectionError("memgraph is down")
+
+    monkeypatch.setattr(graph_retrieval, "search_graph_by_topics", memgraph_is_down)
+    session: Any = None  # never reached: the graph is asked first
+    assert await graph_retrieval.search_graph_claims(session, "RAG evaluation") == []
+
+
+# --- answers know about claims ---
+
+
+def test_context_shows_the_attributed_claim_with_its_type() -> None:
+    passages = [
+        _passage("p1", claim_id="c-1", claim_text="Retries add 40 ms", claim_type="measurement"),
+        _passage("p2"),
+    ]
+    context = format_context(passages)
+    first, second = context.split("\n\n")
+    assert first.splitlines()[1] == "Attributed claim (measurement): Retries add 40 ms"
+    assert first.splitlines()[2] == "text of p1"
+    assert "Attributed claim" not in second
+
+    citations = cited("It adds 40 ms [1], see also [2].", passages)
+    assert (citations[0]["claim_id"], citations[0]["claim_type"]) == ("c-1", "measurement")
+    assert "claim_id" not in citations[1]

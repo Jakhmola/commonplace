@@ -37,22 +37,33 @@ _background_tasks: set[asyncio.Task[None]] = set()
 
 
 def format_context(passages: list[dict[str, Any]]) -> str:
-    """Passages as numbered blocks; the numbers are what the answer cites."""
-    return "\n\n".join(
-        f"[{n}] (Title: {p['title']} | Author: {p.get('author') or 'Unknown'} | URL: {p['url']})\n"
-        f"{p['text']}"
-        for n, p in enumerate(passages, start=1)
-    )
+    """Passages as numbered blocks; the numbers are what the answer cites.
+
+    A passage the claim graph led to also shows that claim and what kind of
+    statement it is, so the model can tell a measurement from an opinion.
+    """
+    blocks = []
+    for n, p in enumerate(passages, start=1):
+        author = p.get("author") or "Unknown"
+        lines = [f"[{n}] (Title: {p['title']} | Author: {author} | URL: {p['url']})"]
+        if p.get("claim_text"):
+            lines.append(f"Attributed claim ({p.get('claim_type') or 'claim'}): {p['claim_text']}")
+        lines.append(p["text"])
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 def _citation(n: int, passage: dict[str, Any]) -> dict[str, Any]:
-    return {
+    citation = {
         "citation_idx": n,
         "passage_id": passage["passage_id"],
         "title": passage["title"],
         "author": passage.get("author"),
         "url": passage["url"],
     }
+    if passage.get("claim_id"):
+        citation |= {"claim_id": passage["claim_id"], "claim_type": passage.get("claim_type")}
+    return citation
 
 
 _BRACKETS = re.compile(r"\[\s*(\d+(?:\s*[,\-\u2013]\s*\d+)*)\s*\]")
@@ -135,7 +146,7 @@ async def ask_question(
     session: AsyncSession, question: str, limit: int | None = None
 ) -> dict[str, Any]:
     started = time.perf_counter()
-    retriever_variant = f"hybrid_rrf_k{settings.rrf_k}"
+    retriever_variant = f"hybrid_3way_rrf_k{settings.rrf_k}"
 
     # The top passages go into the prompt; every candidate goes into the snapshot.
     top, candidates = await hybrid_search(

@@ -1,7 +1,7 @@
 """The MCP tools. Each is a thin call into `operations.py`.
 
-Reads (`cp_health`, `cp_search`, `cp_ask`, `cp_job_status`,
-`cp_list_publications`) answer directly from Postgres. Tools that start work
+Reads (`cp_health`, `cp_search`, `cp_ask`, `cp_sources`, `cp_job_status`,
+`cp_list_publications`) answer directly from Postgres and the graph. Tools that start work
 (`cp_add_publication`, `cp_backfill`, `cp_sync`) send an event and return a
 handle at once: an agent should never sit waiting on a long tool call, so it
 gets something to poll instead.
@@ -37,10 +37,10 @@ def _tool(fn: Tool) -> Tool:
 
 @_tool
 async def cp_health() -> dict[str, Any]:
-    """Check that Postgres and Inngest are reachable, and how big the corpus is.
+    """Check that Postgres, Inngest and Memgraph are reachable, and how big the corpus is.
 
-    Returns per-dependency status (`ok` or `error: ...`) with article and passage
-    counts. Call this first when another tool fails unexpectedly: it says which
+    Returns per-dependency status (`ok` or `error: ...`) with article, passage,
+    claim and topic counts. Call this first when another tool fails unexpectedly: it says which
     dependency is down.
     """
     return await check_health()
@@ -53,9 +53,10 @@ async def cp_search(
 ) -> dict[str, Any]:
     """Search the ingested newsletters and return the best matching passages.
 
-    Hybrid search: keyword and semantic results fused by rank. Each result has
-    the passage text, a short `snippet`, the article's title, author, URL and
-    date, and which engine found it. Returns an empty list when nothing matches.
+    Hybrid search: keyword, semantic and claim-graph results fused by rank. Each
+    result has the passage text, a short `snippet`, the article's title, author,
+    URL and date, which engines found it, and the claim that led to it if the
+    graph did. Returns an empty list when nothing matches.
     Use this to find sources; use cp_ask for a written answer.
     """
     results = await operations.search(query, "hybrid", limit)
@@ -73,6 +74,26 @@ async def cp_ask(
     source cited) and a `snapshot_id` identifying the stored record of this answer.
     """
     return await operations.ask(question)
+
+
+@_tool
+async def cp_sources(
+    claim_or_passage_id: Annotated[
+        str,
+        Field(
+            description="A claim_id or passage_id from a citation returned by cp_ask or cp_search"
+        ),
+    ],
+) -> dict[str, Any]:
+    """Trace a cited claim or passage back to its source and check it is still current.
+
+    Use cp_search to find passages for a query. Use this when you already hold
+    an id from a citation and want to verify it: it returns the exact quoted
+    text, the article, author and publication, for a claim its type (opinion,
+    measurement or prediction) and topics, and its validity (`is_active`, and
+    `valid_to` if the article has since been edited).
+    """
+    return await operations.get_source(claim_or_passage_id)
 
 
 @_tool
