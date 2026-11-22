@@ -29,6 +29,22 @@ make check              # lint, types, tests
 | Inngest dev server | http://localhost:8288 |
 | Adminer (Postgres) | http://localhost:8081 |
 
+## Using it
+
+```bash
+# ingest the newest posts of an allowlisted feed (returns at once)
+curl -X POST localhost:8000/publications -H 'content-type: application/json' \
+  -d '{"feed_url": "https://www.latent.space/feed"}'
+
+curl localhost:8000/jobs/<event_id>                      # progress
+curl 'localhost:8000/search?q=formal+verification&mode=sparse'
+curl 'localhost:8000/search?q=formal+verification&mode=dense'
+
+uv run python scripts/eval_retrieval.py                  # retrieval eval
+```
+
+Feeds must be listed in [`publications.yaml`](publications.yaml).
+
 ## Progress
 
 Build notes for each phase live in [`docs/notes/`](docs/notes/).
