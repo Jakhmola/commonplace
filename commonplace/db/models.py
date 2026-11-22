@@ -248,3 +248,48 @@ class EvalRun(Base):
     variants_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     case_results: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     created_at: Mapped[datetime] = _now()
+
+
+class ResearchRun(Base):
+    """One run of the research agent: what it planned, each hop, why it stopped,
+    the report and how the report scored. Written only by `run-research-agent`.
+    """
+
+    __tablename__ = "research_runs"
+
+    research_id: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    # running, then completed or budget_exceeded
+    status: Mapped[str] = mapped_column(String, nullable=False, default="running")
+    stop_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    plan: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    hops: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    report_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    citations: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    # The whole evidence pool; `in_prompt` marks what the report writer was shown.
+    retrieved: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    eval_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    confidence: Mapped[float | None] = mapped_column(Numeric(5, 4), nullable=True)
+    iterations_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = _now()
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Digest(Base):
+    """The briefing for one window of days. The id is derived from the window,
+    so writing the digest for the same window again replaces it.
+    """
+
+    __tablename__ = "digests"
+
+    digest_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    summary_markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    citations: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    stats: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = _now()

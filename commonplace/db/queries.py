@@ -14,12 +14,14 @@ from commonplace.db.models import (
     Claim,
     Cost,
     Cursor,
+    Digest,
     EvalResult,
     EvalRun,
     Failure,
     Job,
     Passage,
     Publication,
+    ResearchRun,
     Snapshot,
 )
 from commonplace.sources.quote_validator import fold
@@ -890,4 +892,186 @@ async def get_latest_eval_report(session: AsyncSession, limit: int = 10) -> dict
             else None
         ),
         "recorded_failures": {function_id: count for function_id, count in by_function.all()},
+    }
+
+
+# --- research runs ---
+
+
+async def start_research_run(
+    session: AsyncSession, *, research_id: str, event_id: str | None, question: str
+) -> None:
+    """Record that a run has begun. A replay of the step leaves the row as it is."""
+    stmt = insert(ResearchRun).values(
+        research_id=research_id,
+        event_id=event_id,
+        question=question,
+        status="running",
+        plan={},
+        hops=[],
+        citations=[],
+        retrieved=[],
+        eval_summary={},
+        iterations_used=0,
+        total_cost_usd=0,
+        latency_ms=0,
+    )
+    await session.execute(stmt.on_conflict_do_nothing(index_elements=[ResearchRun.research_id]))
+
+
+async def finish_research_run(session: AsyncSession, *, research_id: str, **fields: Any) -> None:
+    await session.execute(
+        update(ResearchRun)
+        .where(ResearchRun.research_id == research_id)
+        .values(**fields, completed_at=func.clock_timestamp())
+    )
+
+
+async def get_research_run(session: AsyncSession, research_id: str) -> dict[str, Any] | None:
+    """One run as a reader wants it: everything except the raw evidence pool."""
+    run = await session.get(ResearchRun, research_id, populate_existing=True)
+    if run is None:
+        return None
+    return {
+        "research_id": run.research_id,
+        "status": run.status,
+        "stop_reason": run.stop_reason,
+        "question": run.question,
+        "report": run.report_text,
+        "citations": run.citations,
+        "plan": run.plan,
+        "hops": run.hops,
+        "eval_summary": run.eval_summary,
+        "confidence": float(run.confidence) if run.confidence is not None else None,
+        "iterations_used": run.iterations_used,
+        "total_cost_usd": float(run.total_cost_usd),
+        "latency_ms": run.latency_ms,
+        "created_at": run.created_at.isoformat(),
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+    }
+
+
+# --- weekly digest ---
+
+
+async def get_articles_in_window(
+    session: AsyncSession, start: datetime, end: datetime, fallback_limit: int = 15
+) -> tuple[list[dict[str, Any]], bool]:
+    """(articles published in [start, end), newest first; whether the fallback was used).
+
+    When nothing was published in the window, the `fallback_limit` most recent
+    articles are returned instead, so a digest can still be written for a
+    library whose newest posts are older than the window.
+    """
+    newest_first = (
+        select(Article, Publication.name)
+        .join(Publication, Publication.id == Article.publication_id)
+        .order_by(Article.published_at.desc(), Article.id)
+    )
+    in_window = newest_first.where(Article.published_at >= start, Article.published_at < end)
+    rows = (await session.execute(in_window)).all()
+    fell_back = not rows
+    if fell_back:
+        rows = (await session.execute(newest_first.limit(fallback_limit))).all()
+    articles = [
+        {
+            "article_id": str(article.id),
+            "canonical_id": article.canonical_id,
+            "title": article.title,
+            "author": article.author,
+            "url": article.url,
+            "publication": publication,
+            "published_at": article.published_at.isoformat(),
+        }
+        for article, publication in rows
+    ]
+    return articles, fell_back
+
+
+async def get_active_claims_for_articles(
+    session: AsyncSession, article_ids: list[uuid.UUID], per_article: int = 3
+) -> list[dict[str, Any]]:
+    """The `per_article` most confident current claims of each article, with their source.
+
+    Newest article first, so the order (and with it the numbering in a digest)
+    is the same on every run.
+    """
+    if not article_ids:
+        return []
+    position = (
+        func.row_number()
+        .over(partition_by=Claim.article_id, order_by=(Claim.confidence.desc(), Claim.id))
+        .label("position")
+    )
+    ranked = (
+        select(Claim.id, position)
+        .where(Claim.article_id.in_(article_ids), Claim.valid_to.is_(None))
+        .subquery()
+    )
+    stmt = (
+        select(Claim, Article, Publication.name)
+        .join(ranked, ranked.c.id == Claim.id)
+        .join(Article, Article.id == Claim.article_id)
+        .join(Publication, Publication.id == Article.publication_id)
+        .where(ranked.c.position <= per_article)
+        .order_by(Article.published_at.desc(), Article.id, ranked.c.position)
+    )
+    return [
+        {
+            "claim_id": str(claim.id),
+            "claim_text": claim.text,
+            "claim_type": claim.claim_type,
+            "topics": [entity["slug"] for entity in claim.entities],
+            "article_id": str(article.id),
+            "title": article.title,
+            "author": article.author,
+            "url": article.url,
+            "publication": publication,
+        }
+        for claim, article, publication in (await session.execute(stmt)).all()
+    ]
+
+
+async def upsert_digest(
+    session: AsyncSession,
+    *,
+    digest_id: uuid.UUID,
+    window_start: datetime,
+    window_end: datetime,
+    title: str,
+    summary_markdown: str,
+    citations: list[dict[str, Any]],
+    stats: dict[str, Any],
+) -> uuid.UUID:
+    fields = {
+        "window_start": window_start,
+        "window_end": window_end,
+        "title": title,
+        "summary_markdown": summary_markdown,
+        "citations": citations,
+        "stats": stats,
+        "created_at": func.clock_timestamp(),
+    }
+    stmt = insert(Digest).values(digest_id=digest_id, **fields)
+    await session.execute(
+        stmt.on_conflict_do_update(index_elements=[Digest.digest_id], set_=fields)
+    )
+    return digest_id
+
+
+async def get_latest_digest(session: AsyncSession) -> dict[str, Any] | None:
+    """The digest for the most recent window."""
+    stmt = select(Digest).order_by(Digest.window_end.desc(), Digest.created_at.desc()).limit(1)
+    digest = (await session.execute(stmt.execution_options(populate_existing=True))).scalar()
+    if digest is None:
+        return None
+    return {
+        "digest_id": str(digest.digest_id),
+        "title": digest.title,
+        "window_start": digest.window_start.isoformat(),
+        "window_end": digest.window_end.isoformat(),
+        "summary_markdown": digest.summary_markdown,
+        "citations": digest.citations,
+        "stats": digest.stats,
+        "created_at": digest.created_at.isoformat(),
     }
