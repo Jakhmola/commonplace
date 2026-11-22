@@ -24,12 +24,13 @@ services:
     ports: ["8081:8080"]
     depends_on: [postgres]
 
+  # Host networking so the dev server reaches the app on localhost (the app runs
+  # outside Docker and stays bound to 127.0.0.1). UI and API on :8288.
   inngest:
     image: inngest/inngest:v1.53.0
     restart: unless-stopped
-    command: inngest dev -u http://host.docker.internal:${APP_PORT:-8000}/api/inngest
-    ports: ["8288:8288", "8289:8289"]
-    extra_hosts: ["host.docker.internal:host-gateway"]
+    network_mode: host
+    command: inngest dev --no-discovery -u http://localhost:${APP_PORT:-8000}/api/inngest
 
 volumes:
   pgdata:
