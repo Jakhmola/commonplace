@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from commonplace.config import settings
 from commonplace.db.queries import (
     count_current_passages,
+    get_active_claims_for_article,
     get_article_by_canonical_id,
     store_passages,
     upsert_article,
@@ -165,17 +166,29 @@ async def ingest_article(ctx: inngest.Context) -> dict[str, object]:
     async def check_content_change() -> dict[str, Any]:
         async with get_session() as session:
             stored = await get_article_by_canonical_id(session, payload.canonical_id)
+            has_claims = bool(stored and await get_active_claims_for_article(session, stored.id))
         return {
             "change": classify_change(
                 stored.content_hash if stored else None, article.content_hash
             ),
             "article_id": str(stored.id) if stored else None,
+            "has_claims": has_claims,
         }
 
     checked = await ctx.step.run("check-content-change", check_content_change)
     change: Change = checked["change"]
     if change == "unchanged":
         # Same text as last time: stop here, before chunking and the paid embedding call.
+        if not checked["has_claims"]:
+            # Stored before claim extraction existed, or its extraction failed:
+            # announce it again so `extract-claims` picks it up.
+            unextracted = ArticleIngested(
+                canonical_id=payload.canonical_id,
+                article_id=checked["article_id"],
+                content_hash=article.content_hash,
+                passage_count=0,
+            )
+            await ctx.step.send_event("emit-for-enrichment", event(ARTICLE_INGESTED, unextracted))
         return {"article_id": checked["article_id"], "passage_count": 0, "status": "unchanged"}
 
     async def chunk() -> list[str]:

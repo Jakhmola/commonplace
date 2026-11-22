@@ -523,7 +523,7 @@ async def get_active_claims_for_article(
     return list((await session.execute(stmt)).scalars())
 
 
-async def get_article_ids_without_claims(
+async def get_articles_without_claims(
     session: AsyncSession, limit: int | None = None
 ) -> list[Article]:
     """Stored articles that have no current claims, oldest first."""

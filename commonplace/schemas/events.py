@@ -16,6 +16,7 @@ FEED_POLL = "cp/feed.poll"
 ARTICLE_DISCOVERED = "cp/article.discovered"
 ARTICLE_INGESTED = "cp/article.ingested"
 ARTICLE_UPDATED = "cp/article.updated"
+CLAIMS_EXTRACTED = "cp/claims.extracted"
 ANSWER_PRODUCED = "cp/answer.produced"
 
 DiscoverySource = Literal["rss", "backfill", "manual", "poll"]
@@ -62,6 +63,17 @@ class ArticleUpdated(BaseModel):
     article_id: UUID
     content_hash: str
     passage_count: int
+
+
+class ClaimsExtracted(BaseModel):
+    """Extraction -> whoever listens. How many claims an article yielded, and how
+    many the quote guardrail threw away.
+    """
+
+    article_id: UUID
+    canonical_id: str
+    claim_count: int
+    dropped_spans: int = 0
 
 
 class AnswerProduced(BaseModel):

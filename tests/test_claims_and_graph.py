@@ -19,6 +19,8 @@ from commonplace.agents.roles.extractor import (
     format_extractor_prompt,
     heuristic_extract_claims,
 )
+from commonplace.functions import FUNCTIONS
+from commonplace.functions.enrich import extract_claims
 from commonplace.graph import cypher
 from commonplace.graph.ontology import (
     EDGE_TYPES,
@@ -29,6 +31,7 @@ from commonplace.graph.ontology import (
     slugify,
 )
 from commonplace.schemas.entities import ClaimExtractionBatch, RawExtractedClaim
+from commonplace.schemas.events import CLAIMS_EXTRACTED, ClaimsExtracted
 from commonplace.schemas.ids import claim_id
 from commonplace.sources.quote_validator import find_verbatim, validate_and_normalize_claims
 
@@ -287,3 +290,40 @@ def test_cypher_is_parameterized_merges_only_and_reads_filter_validity() -> None
             assert "valid_to IS NULL" in statement, name
     # the schema statements are the one place CREATE is allowed (indexes, constraints)
     assert all(s.startswith("CREATE ") for s in cypher.SCHEMA_STATEMENTS)
+
+
+# --- the extract-claims function ---
+
+
+def _extract_config() -> Any:
+    return extract_claims.get_config("http://localhost:8000").main
+
+
+def test_extraction_reacts_to_new_and_updated_articles() -> None:
+    events = {getattr(t, "event", None) for t in _extract_config().triggers}
+    assert events == {"cp/article.ingested", "cp/article.updated"}
+    assert extract_claims in FUNCTIONS
+
+
+def test_extraction_is_serialized_per_article_and_capped_globally() -> None:
+    limits = {c.key: c.limit for c in _extract_config().concurrency}
+    # two quick edits to one article must not interleave their writes
+    assert limits["event.data.canonical_id"] == 1
+    # and the model provider is called by at most this many runs at once
+    assert limits[None] == 2
+
+
+def test_claims_extracted_summarises_the_guardrail() -> None:
+    summary = ClaimsExtracted(
+        article_id=ARTICLE_ID,
+        canonical_id="pub:latent-space:a-post",
+        claim_count=6,
+        dropped_spans=2,
+    )
+    assert CLAIMS_EXTRACTED == "cp/claims.extracted"
+    assert summary.model_dump(mode="json") == {
+        "article_id": str(ARTICLE_ID),
+        "canonical_id": "pub:latent-space:a-post",
+        "claim_count": 6,
+        "dropped_spans": 2,
+    }
