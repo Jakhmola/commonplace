@@ -8,6 +8,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from commonplace.evals.benchmark import (
+    VARIANTS,
+    load_benchmark,
+    missing_expected,
+    score_case,
+    summarise,
+)
 from commonplace.evals.deterministic import is_abstain_answer, run_deterministic_checks
 from commonplace.evals.judges import (
     BinaryVerdict,
@@ -18,7 +25,7 @@ from commonplace.evals.judges import (
 )
 from commonplace.evals.metrics import compute_tpr_tnr, load_taxonomy, mrr, recall_at_k
 from commonplace.functions import FUNCTIONS
-from commonplace.functions.evals import composite_score, evaluate_answer
+from commonplace.functions.evals import composite_score, evaluate_answer, run_eval_suite
 from commonplace.schemas.events import ANSWER_EVALUATED, AnswerEvaluated
 
 # --- the taxonomy: every failure mode has a name and someone responsible for it ---
@@ -271,3 +278,80 @@ def test_answer_evaluated_reports_the_verdicts() -> None:
     )
     assert ANSWER_EVALUATED == "cp/answer.evaluated"
     assert evaluated.model_dump(mode="json")["failure_codes"] == ["FM-5"]
+
+
+# --- the golden benchmark and the variant suite ---
+
+
+def test_the_benchmark_has_cases_in_every_category() -> None:
+    benchmark = load_benchmark()
+    cases = benchmark["cases"]
+    assert benchmark["k"] == 5 and len(cases) >= 20
+    assert len({c["case_id"] for c in cases}) == len(cases)
+    assert {c["category"] for c in cases} == {
+        "keyword",
+        "identifier",
+        "paraphrase",
+        "cross_publication",
+    }
+    for case in cases:
+        assert case["question"].strip() and case["expected_canonical_ids"], case["case_id"]
+        assert all(e.startswith("pub:") for e in case["expected_canonical_ids"]), case["case_id"]
+    # a cross-publication case really does span publications
+    for case in (c for c in cases if c["category"] == "cross_publication"):
+        assert len({e.split(":")[1] for e in case["expected_canonical_ids"]}) >= 2, case["case_id"]
+
+
+def _hits(*canonical_ids: str) -> list[dict[str, Any]]:
+    return [{"passage_id": f"p{i}", "canonical_id": cid} for i, cid in enumerate(canonical_ids)]
+
+
+def test_a_case_is_scored_at_article_level() -> None:
+    case = {"case_id": "c1", "category": "keyword", "expected_canonical_ids": ["pub:x:b"]}
+    # three passages of the same article take one position, not three
+    scored = score_case(case, _hits("pub:x:a", "pub:x:a", "pub:x:a", "pub:x:b", "pub:x:c"), k=5)
+    assert scored["retrieved_canonical_ids"] == ["pub:x:a", "pub:x:b", "pub:x:c"]
+    assert (scored["recall_at_k"], scored["mrr"]) == (1.0, 0.5)
+    assert (scored["case_id"], scored["category"]) == ("c1", "keyword")
+    # only the first k distinct articles count
+    deep = score_case(case, _hits("pub:x:a", "pub:x:c", "pub:x:b"), k=2)
+    assert (deep["recall_at_k"], deep["mrr"]) == (0.0, 0.0)
+
+
+def test_cases_pointing_at_missing_articles_are_reported() -> None:
+    cases = [
+        {"case_id": "c1", "expected_canonical_ids": ["pub:x:a", "pub:x:gone"]},
+        {"case_id": "c2", "expected_canonical_ids": ["pub:x:a"]},
+    ]
+    assert missing_expected(cases, {"pub:x:a"}) == ["pub:x:gone"]
+    assert missing_expected(cases, {"pub:x:a", "pub:x:gone"}) == []
+
+
+def test_summary_averages_and_reports_cross_publication_recall() -> None:
+    results = [
+        {"category": "keyword", "recall_at_k": 1.0, "mrr": 1.0},
+        {"category": "paraphrase", "recall_at_k": 0.0, "mrr": 0.0},
+        {"category": "cross_publication", "recall_at_k": 0.5, "mrr": 0.5},
+        {"category": "cross_publication", "recall_at_k": 1.0, "mrr": 1.0},
+    ]
+    summary = summarise(results)
+    assert summary["cases"] == 4
+    assert summary["recall_at_k"] == pytest.approx(0.625) and summary["mrr"] == pytest.approx(0.625)
+    assert summary["cross_publication_recall"] == pytest.approx(0.75)
+    assert summary["by_category"]["paraphrase"] == {"cases": 1, "recall_at_k": 0.0, "mrr": 0.0}
+    assert summarise([])["cases"] == 0
+
+
+def test_the_suite_runs_one_at_a_time_and_on_request() -> None:
+    config = run_eval_suite.get_config("http://localhost:8000").main
+    (trigger,) = config.triggers
+    assert getattr(trigger, "event", None) == "cp/eval.run"
+    (limit,) = config.concurrency or []
+    assert limit.limit == 1
+    assert run_eval_suite in FUNCTIONS
+    assert VARIANTS == (
+        "sparse_bm25",
+        "dense_pgvector",
+        "hybrid_2way_rrf_k60",
+        "hybrid_3way_rrf_k60",
+    )

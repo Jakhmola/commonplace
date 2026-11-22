@@ -1,0 +1,140 @@
+# Questions with a known right answer in this corpus, for comparing retrievers.
+#
+# Each case names the article(s) that answer the question. A retriever is scored
+# on whether those articles are among the first `k` distinct articles it returns
+# (recall@k) and how high the first of them ranks (reciprocal rank).
+#
+# How this was made: written by the assistant from the claims extracted for each
+# article, one or two questions per chosen article, then grouped by what makes
+# the question hard. The expected articles are the ones each question was written
+# from; other articles may also be relevant, so recall here is a lower bound.
+# The cases are tied to the three feeds as backfilled on 2026-11-22: after a
+# fresh backfill of newer posts, the suite reports which expected articles are
+# missing instead of scoring them as misses.
+#
+# Categories:
+#   keyword            the question reuses the article's own words
+#   identifier         the question hinges on an exact name, version or number
+#   paraphrase         the question avoids the article's vocabulary
+#   cross_publication  the answer is spread over articles from different feeds
+
+suite_name: golden_v1
+k: 5
+
+cases:
+  - case_id: kw-01
+    category: keyword
+    question: Will RoPE remain the predominant position embedding method?
+    expected_canonical_ids: ["pub:ahead-of-ai:understanding-positional-embeddings"]
+  - case_id: kw-02
+    category: keyword
+    question: How much KV cache reduction and decoding throughput does Kimi Linear achieve compared to full attention?
+    expected_canonical_ids: ["pub:ahead-of-ai:beyond-standard-llms"]
+  - case_id: kw-03
+    category: keyword
+    question: Why does grouped-query attention remain appealing compared with MLA?
+    expected_canonical_ids: ["pub:ahead-of-ai:visual-attention-variants"]
+  - case_id: kw-04
+    category: keyword
+    question: At what price per share was the Anthropic IPO priced and where did it close on the first day?
+    expected_canonical_ids:
+      ["pub:latent-space:ainews-anthropic-successfully-completes-largest-ipo-in-history-valued-at-1-5t"]
+  - case_id: kw-05
+    category: keyword
+    question: How was LiteLLM compromised through an API key committed to GitHub?
+    expected_canonical_ids: ["pub:interconnects:podcast-kimi-k31-pro-the-new-cyber"]
+  - case_id: kw-06
+    category: keyword
+    question: Which email provider did Claude Code recommend first in the AEO study?
+    expected_canonical_ids: ["pub:latent-space:resend"]
+
+  - case_id: id-01
+    category: identifier
+    question: Gemini 4 Neon CursorBench 4.1 score
+    expected_canonical_ids: ["pub:latent-space:ainews-gemini-4-neon-gdm-s-opus-sol-contender"]
+  - case_id: id-02
+    category: identifier
+    question: DeepSeekMath V2 meta-verifier proof analysis quality score
+    expected_canonical_ids: ["pub:ahead-of-ai:technical-deepseek"]
+  - case_id: id-03
+    category: identifier
+    question: GLM-5.3 custom license affiliates undefined
+    expected_canonical_ids: ["pub:interconnects:latest-open-artifacts-24-motif-3"]
+  - case_id: id-04
+    category: identifier
+    question: Qwen3.6 35B-A3B RAM usage and tokens per second at 50k-token context
+    expected_canonical_ids: ["pub:ahead-of-ai:using-local-coding-agents"]
+  - case_id: id-05
+    category: identifier
+    question: DeepSeek V4-Pro FLOPs and KV cache at 1M-token context versus V3.2
+    expected_canonical_ids: ["pub:ahead-of-ai:recent-developments-in-llm-architectures"]
+  - case_id: id-06
+    category: identifier
+    question: Gemini 4 Carbon ARC-AGI-3 score with the provider adapter versus the standard harness
+    expected_canonical_ids:
+      ["pub:latent-space:ainews-mercor-750m-series-d-at-20b-valuation-3b-run-rate"]
+
+  - case_id: pa-01
+    category: paraphrase
+    question: How can you tell whether a piece of writing was produced by a machine?
+    expected_canonical_ids:
+      ["pub:ahead-of-ai:ai-detector-from-scratch", "pub:ahead-of-ai:claude-watermarking"]
+  - case_id: pa-02
+    category: paraphrase
+    question: Do the special thinking markers in a model's output actually make it smarter?
+    expected_canonical_ids: ["pub:ahead-of-ai:controlling-reasoning-effort-in-llms"]
+  - case_id: pa-03
+    category: paraphrase
+    question: What simple baseline should I try first when sorting documents into categories?
+    expected_canonical_ids: ["pub:ahead-of-ai:classifier-history-and-jev"]
+  - case_id: pa-04
+    category: paraphrase
+    question: Is it worth studying how neural network designs are put together by hand instead of with scripts?
+    expected_canonical_ids: ["pub:ahead-of-ai:workflow-for-understanding-llms"]
+  - case_id: pa-05
+    category: paraphrase
+    question: When will ordinary people notice this technology changing their daily lives?
+    expected_canonical_ids: ["pub:interconnects:when-will-average-people-feel-ais"]
+  - case_id: pa-06
+    category: paraphrase
+    question: Should a desktop creative application be built with web technology or compiled native code?
+    expected_canonical_ids: ["pub:latent-space:artcraft"]
+  - case_id: pa-07
+    category: paraphrase
+    question: How much of the work filed in a project tracker now comes from software agents rather than people?
+    expected_canonical_ids: ["pub:latent-space:linear-scaling"]
+  - case_id: pa-08
+    category: paraphrase
+    question: Can mathematical proof be used to check that generated programs are correct?
+    expected_canonical_ids: ["pub:latent-space:formal-verification"]
+
+  - case_id: xp-01
+    category: cross_publication
+    question: What is the state of open-weight language models, which architectures are being released and who leads in adoption?
+    expected_canonical_ids:
+      - "pub:ahead-of-ai:a-dream-of-spring-for-open-weight"
+      - "pub:interconnects:the-current-balance-of-power-in-open"
+  - case_id: xp-02
+    category: cross_publication
+    question: Jensen Huang resigning from Nvidia, what happened and what does it mean for open models?
+    expected_canonical_ids:
+      - "pub:latent-space:ainews-jensen-huang-resigns-after-33-years-leading-nvidia"
+      - "pub:interconnects:open-source-ai-without-jensen"
+  - case_id: xp-03
+    category: cross_publication
+    question: What makes a coding agent work beyond the model itself, and how are people running them locally or in the cloud?
+    expected_canonical_ids:
+      - "pub:ahead-of-ai:components-of-a-coding-agent"
+      - "pub:latent-space:codex-work"
+  - case_id: xp-04
+    category: cross_publication
+    question: How should LLMs be evaluated, and what goes wrong with leaderboards and benchmarks?
+    expected_canonical_ids:
+      - "pub:ahead-of-ai:llm-evaluation-4-approaches"
+      - "pub:interconnects:artificial-analysis-v5-and-the-benchmarkers"
+  - case_id: xp-05
+    category: cross_publication
+    question: What do the authors say about inference-time scaling as a source of progress?
+    expected_canonical_ids:
+      - "pub:ahead-of-ai:categories-of-inference-time-scaling"
+      - "pub:interconnects:where-i-stand-on-rsi"

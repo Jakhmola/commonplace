@@ -12,6 +12,9 @@ is given, without making the person who asked wait for it:
 
 Each judge is its own step for the usual reason: if the second one fails, a
 retry does not pay for the first again.
+
+`run-eval-suite` (on cp/eval.run) compares the retrieval variants on the
+golden benchmark.
 """
 
 from dataclasses import asdict
@@ -21,8 +24,22 @@ import inngest
 
 from commonplace.agents.core import run_agent
 from commonplace.config import settings
-from commonplace.db.queries import get_snapshot, get_superseded_ids, upsert_eval_result
+from commonplace.db.queries import (
+    get_existing_canonical_ids,
+    get_snapshot,
+    get_superseded_ids,
+    upsert_eval_result,
+    upsert_eval_run,
+)
 from commonplace.db.session import get_session
+from commonplace.evals.benchmark import (
+    VARIANTS,
+    load_benchmark,
+    missing_expected,
+    retrieve_variant,
+    score_case,
+    summarise,
+)
 from commonplace.evals.deterministic import run_deterministic_checks
 from commonplace.evals.judges import (
     NOT_APPLICABLE,
@@ -37,10 +54,13 @@ from commonplace.inngest_client import client
 from commonplace.schemas.events import (
     ANSWER_EVALUATED,
     ANSWER_PRODUCED,
+    EVAL_RUN_REQUESTED,
     AnswerEvaluated,
     AnswerProduced,
+    EvalRunRequested,
     event,
 )
+from commonplace.sources.embedder import embed_texts, pack, unpack
 
 
 def composite_score(
@@ -160,3 +180,81 @@ async def evaluate_answer(ctx: inngest.Context) -> dict[str, object]:
     )
     await ctx.step.send_event("emit", event(ANSWER_EVALUATED, evaluated))
     return {"eval_id": eval_id, **evaluated.model_dump(mode="json")}
+
+
+@client.create_function(
+    fn_id="run-eval-suite",
+    trigger=inngest.TriggerEvent(event=EVAL_RUN_REQUESTED),
+    # One suite at a time: runs would otherwise compete for the same database
+    # and make each other's timings meaningless.
+    concurrency=[inngest.Concurrency(limit=1)],
+    retries=2,
+)
+async def run_eval_suite(ctx: inngest.Context) -> dict[str, object]:
+    """cp/eval.run -> run-eval-suite.
+
+    Puts the golden questions to each retrieval variant against the live
+    corpus and stores how each did. One step per variant, so a failure in the
+    third does not repeat the first two.
+    """
+    payload = EvalRunRequested.model_validate(ctx.event.data or {})
+
+    async def load() -> dict[str, Any]:
+        benchmark = load_benchmark()
+        expected = {cid for case in benchmark["cases"] for cid in case["expected_canonical_ids"]}
+        async with get_session() as session:
+            stored = await get_existing_canonical_ids(session, sorted(expected))
+        return {**benchmark, "missing_expected": missing_expected(benchmark["cases"], stored)}
+
+    benchmark = await ctx.step.run("load-benchmark", load)
+    cases: list[dict[str, Any]] = benchmark["cases"]
+    k: int = benchmark["k"]
+
+    async def embed_questions() -> dict[str, Any]:
+        result = await embed_texts([case["question"] for case in cases])
+        return {"vectors": [pack(v) for v in result["embeddings"]], "usage": result["usage"]}
+
+    embedded = await ctx.step.run("embed-questions", embed_questions)
+
+    variants_summary: dict[str, Any] = {}
+    case_results: list[dict[str, Any]] = []
+    for variant in VARIANTS:
+
+        async def evaluate(variant: str = variant) -> list[dict[str, Any]]:
+            results = []
+            async with get_session() as session:
+                for case, vector in zip(cases, embedded["vectors"], strict=True):
+                    hits = await retrieve_variant(
+                        session, variant, case["question"], unpack(vector), k
+                    )
+                    results.append({"variant": variant, **score_case(case, hits, k)})
+            return results
+
+        results = await ctx.step.run(f"evaluate-variant-{variant}", evaluate)
+        variants_summary[variant] = summarise(results)
+        case_results.extend(results)
+
+    async def persist() -> str:
+        summary = {
+            "variants": variants_summary,
+            "k": k,
+            "missing_expected": benchmark["missing_expected"],
+        }
+        async with get_session() as session:
+            run_id = await upsert_eval_run(
+                session,
+                run_id=str(ctx.event.id),
+                suite_name=payload.suite_name,
+                variants_summary=summary,
+                case_results=case_results,
+            )
+            await session.commit()
+        return run_id
+
+    run_id = await ctx.step.run("persist-suite-summary", persist)
+    return {
+        "run_id": run_id,
+        "suite_name": payload.suite_name,
+        "variants": variants_summary,
+        "missing_expected": benchmark["missing_expected"],
+    }
