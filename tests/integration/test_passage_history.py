@@ -34,7 +34,6 @@ async def _found(session: AsyncSession, query: str) -> list[str]:
 async def test_an_edit_closes_old_passages_and_search_sees_only_the_new_ones(
     db: AsyncSession, article_id: uuid.UUID
 ) -> None:
-    corpus_before = await count_passages(db)
     await store_passages(
         db, article_id=article_id, passages=passages("quokkazebra one", "quokkazebra two")
     )
@@ -42,7 +41,10 @@ async def test_an_edit_closes_old_passages_and_search_sees_only_the_new_ones(
 
     await store_passages(db, article_id=article_id, passages=passages("wombatokapi rewritten"))
 
-    assert await count_passages(db) == corpus_before + 1  # the corpus size is what is current
+    # The corpus size is what is current. Compared with a direct count taken right
+    # after it, because other ingests may commit to this database while tests run.
+    current = select(func.count()).select_from(Passage).where(Passage.valid_to.is_(None))
+    assert await count_passages(db) == (await db.execute(current)).scalar_one()
 
     assert await _all_rows(db, article_id) == 3  # history is kept
     assert await count_current_passages(db, article_id) == 1

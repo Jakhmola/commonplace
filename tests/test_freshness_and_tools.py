@@ -8,7 +8,8 @@ import pytest
 import respx
 from mcp.server.mcpserver.exceptions import ToolError
 
-from commonplace.functions.freshness import poll_feeds, publications_to_poll
+from commonplace import operations
+from commonplace.functions.freshness import check_feed, poll_feeds, publications_to_poll
 from commonplace.functions.ingest import classify_change
 from commonplace.functions.ops import failure_from_event, handle_function_failed
 from commonplace.mcp import tools
@@ -189,3 +190,59 @@ async def test_unknown_publication_is_a_tool_error() -> None:
         await tools.cp_backfill("no-such-publication")
     with pytest.raises(ToolError, match="not in publications.yaml"):
         await tools.cp_sync("no-such-publication")
+
+
+# --- found in review: polling must be robust, one feed at a time ---
+
+
+@respx.mock
+async def test_a_feed_that_is_down_is_reported_not_raised() -> None:
+    # Raising would fail the whole run and the feeds after this one would never be polled.
+    respx.get(FEED_URL).respond(503)
+    checked = await check_feed(PUBLICATIONS[0], None, None)
+    assert checked["status"] == "error" and "503" in checked["error"]
+    assert checked["pointers"] == []
+
+
+@respx.mock
+async def test_a_feed_that_does_not_parse_is_reported_not_raised() -> None:
+    respx.get(FEED_URL).respond(200, content=b"<html><body>Maintenance</body></html")
+    checked = await check_feed(PUBLICATIONS[0], None, None)
+    assert checked["status"] == "error" and "did not parse" in checked["error"]
+
+
+@respx.mock
+async def test_a_healthy_feed_yields_its_pointers_and_validators() -> None:
+    feed = b"""<rss version="2.0"><channel><item><title>A post</title>
+    <link>https://www.latent.space/p/a-post</link>
+    <pubDate>Tue, 17 Nov 2026 09:48:40 GMT</pubDate></item></channel></rss>"""
+    respx.get(FEED_URL).respond(200, content=feed, headers={"etag": '"v2"'})
+    checked = await check_feed(PUBLICATIONS[0], '"v1"', None)
+    assert (checked["status"], checked["etag"]) == (200, '"v2"')
+    assert [p["url"] for p in checked["pointers"]] == ["https://www.latent.space/p/a-post"]
+
+
+async def test_syncing_all_polls_every_feed(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[inngest.Event] = []
+
+    async def send(events: inngest.Event) -> list[str]:
+        sent.append(events)
+        return ["evt-1"]
+
+    monkeypatch.setattr(operations.client, "send", send)
+    await operations.trigger_poll("all")
+    await operations.trigger_poll(None)
+    await operations.trigger_poll("interconnects")
+    assert [e.data.get("publication") for e in sent] == [None, None, "interconnects"]
+
+
+async def test_inngest_being_down_on_a_write_is_a_bad_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def send(_: object) -> list[str]:
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(operations.client, "send", send)
+    with pytest.raises(operations.OperationError) as raised:
+        await operations.queue_publication(FEED_URL)
+    assert raised.value.status == 502

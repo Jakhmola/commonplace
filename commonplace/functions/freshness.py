@@ -12,7 +12,7 @@ import inngest
 
 from commonplace.db.queries import (
     get_cursor,
-    get_existing_canonical_ids,
+    get_unseen_canonical_ids,
     record_poll,
     save_validators,
     upsert_publication,
@@ -37,6 +37,37 @@ def publications_to_poll(
     return chosen
 
 
+async def check_feed(
+    pub: PublicationEntry, etag: str | None, last_modified: str | None
+) -> dict[str, Any]:
+    """One conditional request to a feed, parsed. Reports a failure instead of raising.
+
+    A feed that is down, throttling or serving garbage must not fail the run:
+    the feeds after it would never be polled, and the next tick is five minutes
+    away anyway.
+    """
+    try:
+        response = await fetch_feed_conditional(
+            pub.feed_url, etag=etag, last_modified=last_modified
+        )
+        pointers = feed_pointers(response.content) if response.content is not None else []
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+            "pointers": [],
+            "etag": etag,
+            "last_modified": last_modified,
+        }
+    return {
+        "status": response.status,
+        "error": None,
+        "pointers": pointers,
+        "etag": response.etag,
+        "last_modified": response.last_modified,
+    }
+
+
 async def _poll(pub: PublicationEntry) -> dict[str, Any]:
     async with get_session() as session:
         publication_id = await upsert_publication(
@@ -47,35 +78,41 @@ async def _poll(pub: PublicationEntry) -> dict[str, Any]:
         last_modified = cursor.last_modified if cursor else None
         await session.commit()
 
-    response = await fetch_feed_conditional(pub.feed_url, etag=etag, last_modified=last_modified)
+    checked = await check_feed(pub, etag, last_modified)
+    result = {
+        "slug": pub.slug,
+        "publication_id": str(publication_id),
+        "status": checked["status"],
+        "error": checked["error"],
+        "etag": checked["etag"],
+        "last_modified": checked["last_modified"],
+        "new": [],
+    }
+    if checked["status"] == "error":
+        return result
 
-    new: list[dict[str, Any]] = []
     async with get_session() as session:
         await record_poll(
-            session, publication_id=publication_id, not_modified=response.status == 304
+            session, publication_id=publication_id, not_modified=checked["status"] == 304
         )
-        if response.content is not None:
-            found = candidates(feed_pointers(response.content), pub, publication_id, via="poll")
-            stored = await get_existing_canonical_ids(session, [c.canonical_id for c in found])
-            new = [c.model_dump(mode="json") for c in found if c.canonical_id not in stored]
-            if not new:
+        if checked["status"] == 200:
+            found = candidates(checked["pointers"], pub, publication_id, via="poll")
+            unseen = set(
+                await get_unseen_canonical_ids(
+                    session, [c.canonical_id for c in found], skip_failed=True
+                )
+            )
+            result["new"] = [c.model_dump(mode="json") for c in found if c.canonical_id in unseen]
+            if not result["new"]:
                 # Nothing to queue, so this version of the feed is dealt with.
                 await save_validators(
                     session,
                     publication_id=publication_id,
-                    etag=response.etag,
-                    last_modified=response.last_modified,
+                    etag=checked["etag"],
+                    last_modified=checked["last_modified"],
                 )
         await session.commit()
-
-    return {
-        "slug": pub.slug,
-        "publication_id": str(publication_id),
-        "status": response.status,
-        "etag": response.etag,
-        "last_modified": response.last_modified,
-        "new": new,
-    }
+    return result
 
 
 @client.create_function(
@@ -115,8 +152,9 @@ async def poll_feeds(ctx: inngest.Context) -> dict[str, object]:
 
             await ctx.step.run(f"remember-{pub.slug}", remember)
 
-        results.append(
-            {"slug": pub.slug, "status": polled["status"], "new_articles": len(polled["new"])}
-        )
+        summary = {"slug": pub.slug, "status": polled["status"], "new_articles": len(polled["new"])}
+        if polled["error"]:
+            summary["error"] = polled["error"]
+        results.append(summary)
 
     return {"polled": len(results), "results": results}

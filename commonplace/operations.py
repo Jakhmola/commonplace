@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+import inngest
 import openai
 
 from commonplace.config import settings
@@ -54,9 +55,18 @@ def _handle(event_id: str, **extra: Any) -> dict[str, Any]:
 # --- writes: send an event, return a handle ---
 
 
+async def _send(events: inngest.Event | list[inngest.Event]) -> list[str]:
+    try:
+        return await client.send(events)
+    except Exception as exc:
+        raise OperationError(
+            502, f"Could not reach Inngest at {settings.inngest_base_url}: {exc}"
+        ) from exc
+
+
 async def queue_publication(feed_url: str) -> dict[str, Any]:
     """Queue a backfill of one feed. An unlisted feed is rejected by the function itself."""
-    (event_id,) = await client.send(event(PUBLICATION_ADDED, PublicationAdded(feed_url=feed_url)))
+    (event_id,) = await _send(event(PUBLICATION_ADDED, PublicationAdded(feed_url=feed_url)))
     return _handle(event_id)
 
 
@@ -74,7 +84,7 @@ def _publications(named: str | None) -> list[PublicationEntry]:
 async def queue_backfill(publication: str = "all") -> dict[str, Any]:
     """Queue a backfill for one publication (slug or feed URL) or for all of them."""
     chosen = _publications(publication)
-    event_ids = await client.send(
+    event_ids = await _send(
         [event(PUBLICATION_ADDED, PublicationAdded(feed_url=p.feed_url)) for p in chosen]
     )
     return {
@@ -88,8 +98,8 @@ async def queue_backfill(publication: str = "all") -> dict[str, Any]:
 
 async def trigger_poll(publication: str | None = None) -> dict[str, Any]:
     """Check feeds for new articles now instead of waiting for the schedule."""
-    slug = _publications(publication)[0].slug if publication else None
-    (event_id,) = await client.send(event(FEED_POLL, FeedPoll(publication=slug)))
+    slug = None if publication in (None, "all") else _publications(publication)[0].slug
+    (event_id,) = await _send(event(FEED_POLL, FeedPoll(publication=slug)))
     return _handle(event_id, status="poll_triggered")
 
 
@@ -126,7 +136,7 @@ async def queue_article(url: str, title: str | None = None) -> dict[str, Any]:
         published_at=datetime.now(UTC),
         via="manual",
     )
-    (event_id,) = await client.send(event(ARTICLE_DISCOVERED, discovered))
+    (event_id,) = await _send(event(ARTICLE_DISCOVERED, discovered))
     return _handle(event_id, priority_offset_s=settings.priority_manual_s)
 
 

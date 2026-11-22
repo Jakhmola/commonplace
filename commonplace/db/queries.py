@@ -267,7 +267,7 @@ async def get_job_status(session: AsyncSession, event_id: str) -> dict[str, Any]
         return None
     stored = await get_existing_canonical_ids(session, job.canonical_ids)
     missing = [cid for cid in job.canonical_ids if cid not in stored]
-    errors = await get_failures_for(session, missing)
+    errors = await get_failures_for(session, missing, since=job.created_at)
 
     job.done = len(stored)
     if job.done >= job.total:
@@ -306,17 +306,39 @@ async def record_failure(
     return failure.id
 
 
-async def get_failures_for(session: AsyncSession, canonical_ids: list[str]) -> dict[str, str]:
-    """canonical id -> latest error, for articles whose ingest run failed for good."""
+async def get_failures_for(
+    session: AsyncSession, canonical_ids: list[str], since: datetime | None = None
+) -> dict[str, str]:
+    """canonical id -> latest error, for articles whose ingest run failed for good.
+
+    `since` limits this to failures recorded from that moment on, so a job is
+    not blamed for a failure that happened before it existed.
+    """
     if not canonical_ids:
         return {}
     failed_id = Failure.event_data["data"]["canonical_id"].astext
-    stmt = (
-        select(failed_id, Failure.error)
-        .where(failed_id.in_(canonical_ids))
-        .order_by(Failure.created_at)
-    )
-    return {cid: error for cid, error in (await session.execute(stmt)).all()}
+    stmt = select(failed_id, Failure.error).where(failed_id.in_(canonical_ids))
+    if since is not None:
+        stmt = stmt.where(Failure.created_at >= since)
+    rows = (await session.execute(stmt.order_by(Failure.created_at))).all()
+    return {cid: error for cid, error in rows}
+
+
+async def get_unseen_canonical_ids(
+    session: AsyncSession, canonical_ids: list[str], *, skip_failed: bool
+) -> list[str]:
+    """The ids, in order, that are not stored yet.
+
+    With `skip_failed`, ids whose ingest already failed for good are left out
+    too: a poller that kept re-queueing an article that can never be ingested
+    would retry it on every poll, forever. An explicit backfill still retries it.
+    """
+    stored = await get_existing_canonical_ids(session, canonical_ids)
+    unseen = [cid for cid in canonical_ids if cid not in stored]
+    if skip_failed:
+        failed = await get_failures_for(session, unseen)
+        unseen = [cid for cid in unseen if cid not in failed]
+    return unseen
 
 
 # --- costs ---

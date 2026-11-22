@@ -28,9 +28,15 @@ def _config() -> Any:
 
 
 def test_concurrency_is_keyed_per_publication() -> None:
-    (concurrency,) = _config().concurrency
-    assert concurrency.key == "event.data.publication_id"
-    assert concurrency.limit == 3
+    limits = {c.key: c.limit for c in _config().concurrency}
+    assert limits["event.data.publication_id"] == 3
+
+
+def test_runs_for_the_same_article_never_overlap() -> None:
+    # Two events for one article (a poll and a manual add, or a feed posted twice)
+    # run one after the other, so the second finds the article stored and stops.
+    limits = {c.key: c.limit for c in _config().concurrency}
+    assert limits["event.data.canonical_id"] == 1
 
 
 def test_runs_are_throttled_globally() -> None:
