@@ -21,7 +21,7 @@ from commonplace.agents.roles.extractor import (
 )
 from commonplace.functions import FUNCTIONS
 from commonplace.functions.ask import cited, format_context
-from commonplace.functions.enrich import extract_claims
+from commonplace.functions.enrich import extract_claims, should_extract
 from commonplace.graph import cypher
 from commonplace.graph.ontology import (
     EDGE_TYPES,
@@ -444,3 +444,12 @@ def test_context_shows_the_attributed_claim_with_its_type() -> None:
     citations = cited("It adds 40 ms [1], see also [2].", passages)
     assert (citations[0]["claim_id"], citations[0]["claim_type"]) == ("c-1", "measurement")
     assert "claim_id" not in citations[1]
+
+
+def test_an_article_is_not_extracted_twice_unless_it_changed() -> None:
+    # A duplicate "ingested" event must not pay for the model again, or replace
+    # the claims of an article whose text is the same.
+    assert should_extract("cp/article.ingested", has_claims=False) is True
+    assert should_extract("cp/article.ingested", has_claims=True) is False
+    # an edit always re-extracts: its claims describe the old text
+    assert should_extract("cp/article.updated", has_claims=True) is True

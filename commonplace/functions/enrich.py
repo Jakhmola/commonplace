@@ -30,7 +30,11 @@ from commonplace.agents.roles.extractor import (
     heuristic_extract_claims,
 )
 from commonplace.config import settings
-from commonplace.db.queries import get_article_with_publication, persist_article_claims
+from commonplace.db.queries import (
+    get_active_claims_for_article,
+    get_article_with_publication,
+    persist_article_claims,
+)
 from commonplace.db.session import get_session
 from commonplace.graph.client import sync_article_claims_to_graph
 from commonplace.graph.ontology import normalize_author
@@ -45,6 +49,17 @@ from commonplace.schemas.events import (
     event,
 )
 from commonplace.sources.quote_validator import validate_and_normalize_claims
+
+
+def should_extract(event_name: str, *, has_claims: bool) -> bool:
+    """Whether this event warrants a (paid) extraction.
+
+    An edited article is always extracted again: its claims describe text that
+    no longer exists. A plain "ingested" event for an article that already has
+    claims is a duplicate, and extracting again would pay for the model twice
+    and replace claims that are still right with a different sample of them.
+    """
+    return event_name == ARTICLE_UPDATED or not has_claims
 
 
 @client.create_function(
@@ -68,10 +83,12 @@ async def extract_claims(ctx: inngest.Context) -> dict[str, object]:
     async def load_article() -> dict[str, Any] | None:
         async with get_session() as session:
             row = await get_article_with_publication(session, payload.article_id)
-        if row is None or not row[0].text.strip():
-            return None
+            if row is None or not row[0].text.strip():
+                return None
+            has_claims = bool(await get_active_claims_for_article(session, payload.article_id))
         article, publication = row
         return {
+            "has_claims": has_claims,
             "article_id": str(article.id),
             "canonical_id": article.canonical_id,
             "url": article.url,
@@ -93,6 +110,8 @@ async def extract_claims(ctx: inngest.Context) -> dict[str, object]:
     )
     if article is None:
         return {**summary.model_dump(mode="json"), "status": "skipped_empty"}
+    if not should_extract(ctx.event.name, has_claims=article["has_claims"]):
+        return {**summary.model_dump(mode="json"), "status": "already_extracted"}
     publication: dict[str, str] = article["publication"]
 
     if settings.anthropic_api_key:
