@@ -1,10 +1,10 @@
 """The MCP tools. Each is a thin call into `operations.py`.
 
-Reads (`cp_health`, `cp_search`, `cp_ask`, `cp_sources`, `cp_job_status`,
-`cp_list_publications`) answer directly from Postgres and the graph. Tools that start work
-(`cp_add_publication`, `cp_backfill`, `cp_sync`) send an event and return a
-handle at once: an agent should never sit waiting on a long tool call, so it
-gets something to poll instead.
+Reads (`cp_health`, `cp_search`, `cp_ask`, `cp_sources`, `cp_eval_report`,
+`cp_job_status`, `cp_list_publications`) answer directly from Postgres and the
+graph. Tools that start work (`cp_add_publication`, `cp_backfill`, `cp_sync`)
+send an event and return a handle at once: an agent should never sit waiting
+on a long tool call, so it gets something to poll instead.
 
 The docstrings are the tool descriptions an agent reads to decide what to call.
 """
@@ -94,6 +94,21 @@ async def cp_sources(
     `valid_to` if the article has since been edited).
     """
     return await operations.get_source(claim_or_passage_id)
+
+
+@_tool
+async def cp_eval_report(
+    limit: Annotated[int, Field(ge=1, le=50, description="How many recent failures to list")] = 10,
+) -> dict[str, Any]:
+    """Report how trustworthy the knowledge base's answers currently are.
+
+    Returns pass rates of the automatic checks and judges over evaluated
+    answers, a count per failure mode (FM-1 to FM-5), the most recent failing
+    answers with the judge's reason, and the latest comparison of retrieval
+    variants (recall@k and MRR for keyword, vector, 2-way and 3-way search).
+    Use it before relying on cp_ask for something that matters.
+    """
+    return await operations.eval_report(limit)
 
 
 @_tool

@@ -22,7 +22,8 @@ from typing import Any
 
 import inngest
 
-from commonplace.agents.core import run_agent
+from commonplace.agents.core import Agent
+from commonplace.agents.providers import ModelRefusal, call_llm
 from commonplace.config import settings
 from commonplace.db.queries import (
     get_existing_canonical_ids,
@@ -78,6 +79,33 @@ def composite_score(
     return 0.5 if disagreement_verdict == "FAIL" else 1.0
 
 
+async def judge_once(agent: Agent[BinaryVerdict], judge_input: str) -> dict[str, Any]:
+    """Run one judge on one trace: `{verdict, critique, failure_code, usage}`.
+
+    If the provider refuses the request, the verdict is recorded as skipped
+    rather than raised: asking again would be refused again, and one refusal
+    must not leave the answer without any score at all.
+    """
+    try:
+        result = await call_llm(
+            system_prompt=agent.system_prompt,
+            user_input=judge_input,
+            model=agent.model,
+            max_tokens=agent.max_tokens,
+            effort=agent.effort,
+            output_schema=BinaryVerdict,
+        )
+    except ModelRefusal as exc:
+        return {
+            "verdict": SKIPPED,
+            "critique": f"The judge was refused by the provider: {exc}",
+            "failure_code": "NONE",
+        }
+    verdict = BinaryVerdict.model_validate(result["output"])
+    # `usage` at the top level is what the cost middleware looks for.
+    return {**verdict.model_dump(), "usage": result["usage"]}
+
+
 @client.create_function(
     fn_id="evaluate-answer",
     trigger=inngest.TriggerEvent(event=ANSWER_PRODUCED),
@@ -130,15 +158,18 @@ async def evaluate_answer(ctx: inngest.Context) -> dict[str, object]:
     checks = await ctx.step.run("score-deterministic", score_deterministic)
     failure_codes: list[str] = list(checks["failure_codes"])
 
-    async def judge(agent: Any, step_id: str) -> dict[str, str]:
+    async def judge(agent: Agent[BinaryVerdict], step_id: str) -> dict[str, Any]:
         """One judge as one step. Without a key nothing runs and the verdict says so."""
         if not settings.anthropic_api_key:
             return {"verdict": SKIPPED, "critique": "No ANTHROPIC_API_KEY: the judge did not run."}
-        verdict = await run_agent(ctx.step, agent, format_judge_input(**trace), step_id)
-        assert isinstance(verdict, BinaryVerdict)
-        if verdict.verdict == "FAIL" and verdict.failure_code not in ("NONE", *failure_codes):
-            failure_codes.append(verdict.failure_code)
-        return {"verdict": verdict.verdict, "critique": verdict.critique}
+
+        async def call() -> dict[str, Any]:
+            return await judge_once(agent, format_judge_input(**trace))
+
+        verdict = await ctx.step.run(step_id, call)
+        if verdict["verdict"] == "FAIL" and verdict["failure_code"] not in ("NONE", *failure_codes):
+            failure_codes.append(verdict["failure_code"])
+        return verdict
 
     faithfulness = await judge(faithfulness_judge, "judge-faithfulness")
     if requires_disagreement_check(retrieved, settings.retrieval_limit):

@@ -10,7 +10,6 @@ answer with a `cp/answer.produced` event that the caller does not wait for.
 import asyncio
 import contextlib
 import logging
-import re
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -20,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from commonplace.agents.prompts import ASK_SYSTEM_PROMPT
 from commonplace.agents.providers import call_llm, get_llm
+from commonplace.citations import NO_PASSAGES, cited_numbers
 from commonplace.config import settings
 from commonplace.db.queries import insert_cost, save_snapshot
 from commonplace.inngest_client import client
@@ -28,8 +28,6 @@ from commonplace.schemas.events import ANSWER_PRODUCED, AnswerProduced, event
 from commonplace.schemas.ids import snapshot_id
 
 logger = logging.getLogger(__name__)
-
-NO_PASSAGES = "No relevant passages were found in the knowledge base for this question."
 
 # asyncio keeps only weak references to tasks, so a fire-and-forget task that
 # nothing holds can be garbage collected before it finishes.
@@ -64,21 +62,6 @@ def _citation(n: int, passage: dict[str, Any]) -> dict[str, Any]:
     if passage.get("claim_id"):
         citation |= {"claim_id": passage["claim_id"], "claim_type": passage.get("claim_type")}
     return citation
-
-
-_BRACKETS = re.compile(r"\[\s*(\d+(?:\s*[,\-\u2013]\s*\d+)*)\s*\]")
-
-
-def cited_numbers(answer_text: str) -> set[int]:
-    """Passage numbers an answer refers to: [1], [1][2], [1, 2] and [1-3] all count."""
-    numbers: set[int] = set()
-    for group in _BRACKETS.findall(answer_text):
-        for part in group.split(","):
-            first, _, last = part.replace("\u2013", "-").partition("-")
-            low, high = int(first), int(last or first)
-            if high - low < 50:  # a range, not two unrelated numbers far apart
-                numbers.update(range(low, high + 1))
-    return numbers
 
 
 def cited(answer_text: str, passages: list[dict[str, Any]]) -> list[dict[str, Any]]:

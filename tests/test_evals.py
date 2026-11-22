@@ -3,11 +3,15 @@
 No Docker or keys needed.
 """
 
+import subprocess
+import sys
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from commonplace.agents.providers import ModelRefusal
+from commonplace.evals import calibration
 from commonplace.evals.benchmark import (
     VARIANTS,
     load_benchmark,
@@ -15,6 +19,7 @@ from commonplace.evals.benchmark import (
     score_case,
     summarise,
 )
+from commonplace.evals.calibration import EVALUATORS, calibrate_deterministic, in_scope
 from commonplace.evals.deterministic import is_abstain_answer, run_deterministic_checks
 from commonplace.evals.judges import (
     BinaryVerdict,
@@ -23,9 +28,21 @@ from commonplace.evals.judges import (
     format_judge_input,
     requires_disagreement_check,
 )
-from commonplace.evals.metrics import compute_tpr_tnr, load_taxonomy, mrr, recall_at_k
+from commonplace.evals.metrics import (
+    compute_tpr_tnr,
+    load_labeled_traces,
+    load_taxonomy,
+    mrr,
+    recall_at_k,
+)
 from commonplace.functions import FUNCTIONS
-from commonplace.functions.evals import composite_score, evaluate_answer, run_eval_suite
+from commonplace.functions import evals as evals_functions
+from commonplace.functions.evals import (
+    composite_score,
+    evaluate_answer,
+    judge_once,
+    run_eval_suite,
+)
 from commonplace.schemas.events import ANSWER_EVALUATED, AnswerEvaluated
 
 # --- the taxonomy: every failure mode has a name and someone responsible for it ---
@@ -355,3 +372,98 @@ def test_the_suite_runs_one_at_a_time_and_on_request() -> None:
         "hybrid_2way_rrf_k60",
         "hybrid_3way_rrf_k60",
     )
+
+
+# --- labelled traces and calibration ---
+
+
+def test_labelled_traces_cover_every_code_the_evaluators_own() -> None:
+    traces = load_labeled_traces()
+    assert len(traces) >= 20
+    assert len({t["trace_id"] for t in traces}) == len(traces)
+    assert {t["failure_code"] for t in traces} == {"NONE", "FM-1", "FM-2", "FM-3", "FM-4", "FM-5"}
+    assert {t["origin"] for t in traces} == {"real", "perturbed"}
+    for trace in traces:
+        assert trace["note"].strip(), trace["trace_id"]
+        assert set(trace["expected"]) == {"deterministic", "faithfulness", "disagreement"}
+        failed = "FAIL" in trace["expected"].values()
+        assert (trace["expected_verdict"] == "FAIL") is failed, trace["trace_id"]
+        if trace["origin"] == "perturbed":
+            assert trace["based_on"].startswith("real-"), trace["trace_id"]
+    # every evaluator has examples of both classes to be measured on
+    for evaluator in ("deterministic", "faithfulness", "disagreement"):
+        verdicts = {t["expected"][evaluator] for t in traces} - {None}
+        assert verdicts == {"PASS", "FAIL"}, evaluator
+
+
+def test_offline_calibration_of_the_deterministic_level_is_aligned() -> None:
+    traces = load_labeled_traces()
+    report = calibrate_deterministic(traces)
+    assert report.labeled_fail >= 5 and report.labeled_pass >= 10
+    assert report.disagreements == []
+    assert (report.tpr, report.tnr, report.aligned) == (1.0, 1.0, True)
+
+
+def test_a_trace_is_only_scored_by_the_evaluators_it_was_labelled_for() -> None:
+    trace = {"expected": {"deterministic": "PASS", "faithfulness": None, "disagreement": "FAIL"}}
+    assert [e for e in EVALUATORS if in_scope(trace, e)] == ["deterministic", "disagreement"]
+
+
+def test_the_evaluators_import_without_the_functions_they_evaluate() -> None:
+    # A fresh interpreter, as a script would start: the checks must not pull in
+    # `commonplace.functions`, which itself imports the checks.
+    code = (
+        "import sys, commonplace.evals.calibration;"
+        "assert 'commonplace.functions' not in sys.modules"
+    )
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr[-500:]
+
+
+# --- a judge that the provider refuses to run ---
+
+
+async def test_a_refused_judge_is_recorded_as_skipped_not_as_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def refuses(**_: Any) -> dict[str, Any]:
+        raise ModelRefusal("The model returned no parseable output (stop reason: refusal)")
+
+    monkeypatch.setattr(evals_functions, "call_llm", refuses)
+    verdict = await judge_once(faithfulness_judge, "Question: ...")
+    assert verdict["verdict"] == "SKIPPED" and "refus" in verdict["critique"]
+    assert composite_score(True, verdict["verdict"], "NOT_APPLICABLE") == 1.0
+
+
+async def test_a_judge_verdict_carries_its_usage_for_cost_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usage = {"model": "m", "input_tokens": 900, "output_tokens": 200, "est_usd": 0.0076}
+
+    async def judges(**_: Any) -> dict[str, Any]:
+        output = {"critique": "[1] does not say this.", "verdict": "FAIL", "failure_code": "FM-4"}
+        return {"output": output, "usage": usage, "stop_reason": "end_turn"}
+
+    monkeypatch.setattr(evals_functions, "call_llm", judges)
+    verdict = await judge_once(faithfulness_judge, "Question: ...")
+    assert (verdict["verdict"], verdict["failure_code"]) == ("FAIL", "FM-4")
+    assert verdict["usage"] == usage
+
+
+async def test_in_calibration_a_refusal_counts_against_the_judge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def refuses(**_: Any) -> dict[str, Any]:
+        raise ModelRefusal("refusal")
+
+    monkeypatch.setattr(calibration, "call_llm", refuses)
+    trace = {
+        "trace_id": "t1",
+        "question": "q",
+        "retrieved": [],
+        "answer_text": "a",
+        "expected": {"deterministic": "PASS", "faithfulness": "PASS", "disagreement": None},
+    }
+    report, verdicts = await calibration.calibrate_judge("faithfulness", [trace])
+    assert (report.false_positives, report.tnr) == (1, 0.0)  # it did not clear a good answer
+    assert "refus" in verdicts["t1"].critique

@@ -168,11 +168,12 @@ READ_TOOLS = {
     "cp_job_status",
     "cp_list_publications",
     "cp_sources",
+    "cp_eval_report",
 }
 TRIGGER_TOOLS = {"cp_add_publication", "cp_backfill", "cp_sync"}
 
 
-async def test_the_server_registers_the_nine_tools() -> None:
+async def test_the_server_registers_the_ten_tools() -> None:
     names = {tool.name for tool in await mcp.list_tools()}
     assert names == READ_TOOLS | TRIGGER_TOOLS
     assert all(tool.description for tool in await mcp.list_tools())  # an agent reads these
@@ -258,3 +259,16 @@ async def test_inngest_being_down_on_a_write_is_a_bad_gateway(
 async def test_a_bad_source_id_is_a_tool_error() -> None:
     with pytest.raises(ToolError, match="Not a valid id"):
         await tools.cp_sources("not-a-uuid")
+
+
+async def test_requesting_the_eval_suite_returns_a_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[inngest.Event] = []
+
+    async def send(event: inngest.Event) -> list[str]:
+        sent.append(event)
+        return ["evt-suite"]
+
+    monkeypatch.setattr(operations.client, "send", send)
+    handle = await operations.queue_eval_suite()
+    assert (sent[0].name, sent[0].data) == ("cp/eval.run", {"suite_name": "golden_v1"})
+    assert handle["event_id"] == "evt-suite" and handle["status"] == "queued"

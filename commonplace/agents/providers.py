@@ -27,6 +27,12 @@ _DEFAULT_PRICE = MODEL_PRICES["claude-opus-5-5"]
 _llm: anthropic.AsyncAnthropic | None = None
 
 
+class ModelRefusal(RuntimeError):
+    """The provider declined the request (and its fallback did too). Trying the
+    same request again will usually be declined again.
+    """
+
+
 def get_llm() -> anthropic.AsyncAnthropic | None:
     """The Anthropic client, or None when no key is configured."""
     global _llm
@@ -86,7 +92,8 @@ async def call_llm(
             # Raised here, inside the step, so the step is retried with a fresh
             # call. Returning None would be memoized, and every replay of the
             # function would then fail on the same empty result.
-            raise RuntimeError(
+            error = ModelRefusal if response.stop_reason == "refusal" else RuntimeError
+            raise error(
                 f"The model returned no parseable output (stop reason: {response.stop_reason})"
             )
         output = parsed.model_dump(mode="json")

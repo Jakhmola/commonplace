@@ -32,6 +32,7 @@ for _read in (
     tools.cp_search,
     tools.cp_ask,
     tools.cp_sources,
+    tools.cp_eval_report,
     tools.cp_job_status,
     tools.cp_list_publications,
 ):

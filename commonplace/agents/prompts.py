@@ -68,27 +68,40 @@ answers anyway from general knowledge, typically with no citations at all.
 PASS with failure_code "NONE" if every statement is supported by its cited passage, or if the \
 answer correctly says that the passages do not cover the question.
 
+Judge each statement against the text of the passage as it is shown, not against what is \
+probably true. Passages are excerpts and can start or end mid-thought. If a passage refers to \
+something without naming it (a sentence whose subject was cut off, an "it" or "they" with no \
+referent in the excerpt) and the answer supplies the name, the answer has added a detail that \
+is not in the passage, however plausible the guess.
+
 These are not failures: an answer that is short or incomplete, a faithful paraphrase or \
 summary, careful hedging, or a refusal to go beyond the passages. Whether the answer reports \
 disagreement between sources is judged separately; ignore it here. Judge faithfulness only."""
 
 DISAGREEMENT_JUDGE_SYSTEM_PROMPT = """\
 You are checking one answer produced by a question-answering system. The system was shown a \
-set of numbered passages by different authors and asked to answer a question from them. You \
-decide one thing: does the answer hide a real disagreement between its sources?
+set of numbered passages and asked to answer a question from them. You decide one thing: does \
+the answer hide a real disagreement that its sources show?
 
-Write `critique` first. List each author among the passages and, in a phrase, what that author \
-says that bears on the question. Then say whether any two authors genuinely conflict: they \
-make incompatible claims, or recommend opposite things, about the same point. Only then give \
-the verdict.
+A disagreement counts when two sides hold incompatible positions, or recommend opposite \
+things, on the point the question asks about. The two sides can be two authors of the \
+passages. They can also be an author and another party whose opposing position a passage \
+reports ("the labs hold X; I argue Y"): the reader of the answer is misled just the same if \
+only one of them is passed on.
 
-FAIL with failure_code "FM-5" if the passages contain a genuine conflict between different \
-authors that is relevant to the question, and the answer presents one side as the settled \
-view or leaves the other side out.
+Write `critique` first. List the positions that bear on the question and who holds each, \
+including positions the passages attribute to others. Say whether any two of them genuinely \
+conflict. Then say whether the answer presents the conflict or only one side of it. Only then \
+give the verdict.
+
+FAIL with failure_code "FM-5" if the passages show a genuine conflict on the point the \
+question asks about, and the answer gives one side as the settled answer or leaves the other \
+side out.
 
 PASS with failure_code "NONE" if the answer presents both sides, or if there is no genuine \
-conflict to report: the authors talk about different things, their statements are compatible, \
-they differ only in emphasis, or one of them does not address the question at all.
+conflict to report: the sources talk about different things, their statements are compatible, \
+or they differ only in emphasis. An answer that reports one person's view as that person's \
+view, because that is what the question asked for, has not hidden anything.
 
 Most sets of passages contain no real disagreement. Do not construct one from differences in \
 wording or scope. Whether each statement is supported by its passage is judged separately; \

@@ -18,6 +18,7 @@ import openai
 from commonplace.config import settings
 from commonplace.db.queries import (
     get_job_status,
+    get_latest_eval_report,
     get_source_provenance,
     list_publications_with_stats,
     upsert_publication,
@@ -28,9 +29,11 @@ from commonplace.inngest_client import client
 from commonplace.retrieval import dense, hybrid, sparse
 from commonplace.schemas.events import (
     ARTICLE_DISCOVERED,
+    EVAL_RUN_REQUESTED,
     FEED_POLL,
     PUBLICATION_ADDED,
     ArticleDiscovered,
+    EvalRunRequested,
     FeedPoll,
     PublicationAdded,
     event,
@@ -251,3 +254,15 @@ async def get_source(claim_or_passage_id: str) -> dict[str, Any]:
     if source is None:
         raise OperationError(404, f"No claim or passage has the id {claim_or_passage_id!r}")
     return source
+
+
+async def queue_eval_suite(suite_name: str = "golden_v1") -> dict[str, Any]:
+    """Queue a run of the retrieval benchmark. The result appears in the eval report."""
+    (event_id,) = await _send(event(EVAL_RUN_REQUESTED, EvalRunRequested(suite_name=suite_name)))
+    return _handle(event_id, suite_name=suite_name)
+
+
+async def eval_report(limit: int = 10) -> dict[str, Any]:
+    """How answers are scoring, which failure modes occur, and the last variant comparison."""
+    async with get_session() as session:
+        return await get_latest_eval_report(session, limit)

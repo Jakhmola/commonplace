@@ -74,3 +74,15 @@ class AskRequest(BaseModel):
 async def ask(payload: AskRequest) -> dict[str, Any]:
     """Answer a question with inline citations. A read: it never creates an Inngest run."""
     return await operations.ask(payload.question, payload.limit)
+
+
+@app.post("/evals/run")
+async def run_evals() -> dict[str, Any]:
+    """Queue the retrieval benchmark. Poll GET /jobs/{event_id}, then read GET /evals/latest."""
+    return await operations.queue_eval_suite()
+
+
+@app.get("/evals/latest")
+async def latest_evals(limit: int = Query(default=10, ge=1, le=50)) -> dict[str, Any]:
+    """Pass rates, failure modes, recent failures with reasons, and the last variant comparison."""
+    return await operations.eval_report(limit)

@@ -59,8 +59,9 @@ failure_modes:
     layer: synthesis
     evaluator: disagreement judge
     description: >
-      The passages in the prompt include authors who take different positions on
-      the question, and the answer presents one of them as the settled view.
+      The passages in the prompt show that the question is contested, between two
+      of their authors or between an author and a party whose opposing position a
+      passage reports, and the answer presents one side as the settled view.
     example: >
       One author argues evaluation should lean on LLM judges, another that judges
       are unreliable without verifiers; the answer recommends judges and cites only the first.

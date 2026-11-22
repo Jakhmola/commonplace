@@ -10,7 +10,7 @@ passage takes reading, and is left to the judges.
 from dataclasses import dataclass
 from typing import Any
 
-from commonplace.functions.ask import NO_PASSAGES, cited_numbers
+from commonplace.citations import NO_PASSAGES, cited_numbers
 
 # How an answer says "the library does not cover this". The first is what
 # `/ask` returns by itself when nothing was retrieved or no key is set; the
