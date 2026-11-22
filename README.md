@@ -54,10 +54,34 @@ curl -X POST localhost:8000/ask -H 'content-type: application/json' \
 # show that replaying every backfill writes nothing new
 uv run python scripts/replay_backfill.py --verify
 uv run python scripts/replay_backfill.py --all
+
+# check the feeds for new articles now (they are also polled every five minutes)
+curl -X POST localhost:8288/e/dev -H 'content-type: application/json' \
+  -d '{"name": "cp/feed.poll", "data": {}}'
 ```
 
 Feeds must be listed in [`publications.yaml`](publications.yaml). `/ask` needs
 `ANTHROPIC_API_KEY`; without it the retrieved passages are returned on their own.
+
+## Using it from Claude Code (MCP)
+
+`cp-mcp` serves the knowledge base as MCP tools over stdio: `cp_search`, `cp_ask`,
+`cp_list_publications`, `cp_job_status`, `cp_health`, `cp_add_publication`,
+`cp_backfill` and `cp_sync`. [`.mcp.json`](.mcp.json) registers it for Claude Code
+when Claude Code is started in this directory (it asks once before enabling it).
+From anywhere else:
+
+```bash
+claude mcp add commonplace -- uv run --directory /path/to/commonplace cp-mcp
+```
+
+The stack (`make start`) has to be running.
+
+## Tests
+
+`make test` runs everything. Unit tests need nothing. The tests in
+`tests/integration/` use the real Postgres from `make up`, each inside a
+transaction that is rolled back, and are skipped when it is not running.
 
 ## Progress
 
