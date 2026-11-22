@@ -1,3 +1,6 @@
+import base64
+from array import array
+
 from openai import AsyncOpenAI
 
 from commonplace.config import settings
@@ -23,3 +26,16 @@ async def embed(texts: list[str]) -> tuple[list[list[float]], int]:
 
 def cost_usd(tokens: int) -> float:
     return tokens / 1_000_000 * settings.embedding_usd_per_mtok
+
+
+def pack(v: list[float]) -> str:
+    """float32 + base64: ~8 KB per 1536-d vector instead of ~33 KB of JSON.
+
+    Inngest caps a step's output at 4 MB; as JSON floats a 114-passage article
+    already hit 3.8 MB. Packed, the ceiling is roughly 490 passages per article.
+    """
+    return base64.b64encode(array("f", v).tobytes()).decode()
+
+
+def unpack(s: str) -> list[float]:
+    return array("f", base64.b64decode(s)).tolist()

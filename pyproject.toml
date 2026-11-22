@@ -50,7 +50,7 @@ python_version = "3.12"
 plugins = ["pydantic.mypy"]
 disallow_untyped_defs = true
 warn_unused_ignores = true
-files = ["commonplace", "tests"]
+files = ["commonplace", "scripts", "tests"]
 
 [[tool.mypy.overrides]]
 module = ["feedparser"]

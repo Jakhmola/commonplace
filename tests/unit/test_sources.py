@@ -83,3 +83,13 @@ def test_extract_article_drops_page_chrome() -> None:
     assert "replays the function from the top" in art.text
     assert "Subscribe now" not in art.text
     assert len(art.content_hash) == 64
+
+
+def test_vector_pack_roundtrip_is_float32_exact_and_small() -> None:
+    from array import array
+
+    from commonplace.sources.embed import pack, unpack
+
+    v = [0.1 * i - 0.05 for i in range(1536)]
+    assert unpack(pack(v)) == array("f", v).tolist()
+    assert len(pack(v)) < 8300
