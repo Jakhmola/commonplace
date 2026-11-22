@@ -74,8 +74,11 @@ retry does not pay for the first judge twice, and judge calls show up in `costs`
 
 25 questions written from this corpus, in four categories, each naming the
 article(s) that answer it. `run-eval-suite` puts every question to four retrieval
-variants **against the live corpus** and scores recall@5 and reciprocal rank per
-article (three passages of one long post count once).
+variants **against the live corpus** and scores each on its first five passages,
+the ones that would reach a prompt: are the expected articles among the articles
+those passages come from (recall@5), and how high does the first of them rank
+(MRR). The hybrid variants run through the same function `/ask` calls, so the
+numbers describe what the model is actually shown.
 
 ## Results
 
@@ -83,41 +86,51 @@ article (three passages of one long post count once).
 
 | Variant | Recall@5 | MRR | Keyword | Identifier | Paraphrase | Cross-publication |
 |---|---|---|---|---|---|---|
-| `sparse_bm25` | 0.82 | 0.77 | 1.00 | 1.00 | 0.62 | 0.70 |
-| `dense_pgvector` | 0.96 | 0.94 | 1.00 | 1.00 | 1.00 | 0.80 |
-| `hybrid_2way_rrf_k60` | 0.96 | 0.87 | 1.00 | 1.00 | 0.94 | 0.90 |
-| `hybrid_3way_rrf_k60` | 0.94 | 0.89 | 1.00 | 1.00 | 0.94 | 0.80 |
+| `sparse_bm25` | 0.80 | 0.75 | 1.00 | 1.00 | 0.63 | 0.60 |
+| `dense_pgvector` | 0.86 | 0.92 | 1.00 | 1.00 | 0.81 | 0.60 |
+| `hybrid_2way_rrf_k60` | 0.86 | 0.87 | 1.00 | 1.00 | 0.81 | 0.60 |
+| `hybrid_3way_rrf_k60` (what `/ask` uses) | 0.82 | 0.86 | 1.00 | 1.00 | 0.75 | 0.50 |
 
-(Category columns are recall@5.)
+(Category columns are recall@5. The graph found 39 of the 125 passages in the
+three-way prompts, so its leg was active; the run is flagged `degraded` if it is not.)
 
 What this says, without dressing it up:
 
 - **Keyword search alone is the weak one**, and exactly where expected: paraphrased
-  questions (0.62).
-- **Vector search alone is as good as either hybrid on this benchmark**, and ranks
-  the right article higher (MRR 0.94). Fusing in the keyword ranking pulls some
+  questions (0.63).
+- **Vector search alone is as good as two-way fusion on this benchmark**, and ranks
+  the right article higher (MRR 0.92). Fusing in the keyword ranking pulls some
   right answers down a place.
-- **The graph leg did not help here.** Three-way is no better than two-way, and on
-  the five cross-publication cases, the ones the graph was added for, it found one
-  expected article fewer.
+- **The graph leg did not help, and here it cost a little.** The three-way search
+  that `/ask` uses scores one case-equivalent below vector search alone, and it is
+  lowest on the cross-publication questions, the ones the graph was added for.
+- **Cross-publication questions are the real weakness of every variant** (0.50 to
+  0.60). The cause is visible in the stored cases: the five passages often come
+  from two articles, sometimes one, so the second publication never reaches the
+  prompt. Nothing limits how many passages one article may take.
 
-The honest reading is that on a 60-article corpus, with questions I wrote, there is
-not enough headroom for hybrid retrieval or the graph to show a benefit, and 25
-cases cannot separate variants that differ by one case. The graph still earns its
-place for what it stores (claims, types, sources, supersession), but its value as a
-retriever is not demonstrated. That is worth knowing, and it is the kind of thing
-this suite exists to tell me.
+The honest reading: on a 60-article corpus, with 25 questions I wrote, variants
+that differ by one case cannot be told apart, so this does not show that the
+graph hurts. It does show that its value as a retriever is not demonstrated, and
+it points at a concrete next step that would help all variants: cap the passages
+per article in the prompt. The graph still earns its place for what it stores
+(claims, their types, their sources, supersession), which the answers use.
+
+An earlier version of this table reported higher numbers (0.94 to 0.96 for the
+vector and hybrid variants). It scored the first five distinct *articles* of a
+longer result list, which is not what reaches a prompt. The review of this phase
+caught that; the table above is the corrected measurement.
 
 ### Calibration of the evaluators (21 labelled traces)
 
 | Evaluator | Traces | TPR (failures caught) | TNR (good answers cleared) |
 |---|---|---|---|
 | Checks in code | 21 | 1.00 (5 of 5) | 1.00 (16 of 16) |
-| Faithfulness judge | 19 | 1.00 (8 of 8) | 0.91 (10 of 11) |
+| Faithfulness judge | 17 | 1.00 (8 of 8) | 1.00 (9 of 9) in the latest run, 0.89 (8 of 9) in the one before |
 | Disagreement judge | 6 | 1.00 (2 of 2) | 1.00 (4 of 4) |
 
-All three are above the 0.90 thresholds. These numbers come with caveats that
-matter more than the numbers:
+The thresholds are 0.90. These numbers come with caveats that matter more than
+the numbers:
 
 - **The first run was worse, and that was the point of running it.** With the
   original prompts the faithfulness judge caught 7 of 8 failures and the
@@ -125,9 +138,14 @@ matter more than the numbers:
   between two authors of the passages, while my failing examples had one author
   reporting another party's opposing position. I widened the definition (in the
   prompt and in the taxonomy) and told the faithfulness judge not to accept a name
-  the passage leaves unnamed. The table is the second run.
+  the passage leaves unnamed. The table is from after that change.
 - **The prompts were tuned on the same traces they are measured on.** There is no
   held-out set, so the table is optimistic.
+- **The judge is not stable from run to run.** The same prompt on the same traces
+  gave two different results on one answer: flagged in one run, cleared in the
+  next. With nine good answers in scope, one flip is the difference between 1.00
+  and 0.89, which is below the threshold. One call per trace is too few to call
+  the judge calibrated; the table reports both runs for that reason.
 - **The sample is tiny.** Two failing examples for the disagreement judge say
   almost nothing about its real miss rate.
 - **I labelled the traces.** Ten are real answers that I read against their
@@ -137,12 +155,14 @@ matter more than the numbers:
 - **The judge and the answerer are the same model**, which is known to be lenient
   towards its own output. A different judge model can be set with `EVAL_JUDGE_MODEL`.
 
-The remaining disagreement is instructive. On one real answer the judge says FAIL
-where I said PASS: the answer cites passage [4] for a sentence whose name and title
-are actually in passage [3], and credits a blog post with a repositioning the
-passage credits to the company. I read that as acceptable because the information
-was in the prompt; the judge read it as a mis-citation. I left my label alone
-rather than move it to agree with the judge.
+The answer the judge flips on is instructive. It cites passage [4] for a sentence
+whose name and title are actually in passage [3], and credits a blog post with a
+repositioning the passage credits to the company. I labelled it PASS because the
+information was in the prompt; read strictly against the taxonomy ("not supported
+by the passage it cites") the judge's FAIL is defensible. I left my label alone
+rather than move it to agree with the judge, and the disagreement is real: the
+taxonomy does not yet say whether a correct statement with the wrong citation
+number is a failure.
 
 One of the ten real answers was a genuine failure (it named a product where the
 cited excerpt, cut off mid-sentence, never did). A 10% failure rate on a ten-answer
@@ -150,8 +170,13 @@ sample is not a statistic, but it is a reminder that "reads fine" is not evidenc
 
 ### Online, so far
 
-12 answers scored: every one passed the checks in code, 11 of 12 passed the
-faithfulness judge, mean confidence 0.92.
+12 answers scored. Every one passed the checks in code. The faithfulness judge
+gave a verdict on 11 (the provider refused to judge one, about cyber security)
+and passed 9 of them; mean confidence 0.83. All twelve were scored again after
+the judge prompts changed: under the first version of the prompts the same
+answers had read 11 of 12 passing. Each score now records which judge gave it
+(model and a hash of the prompts), so numbers from different judges are not
+averaged together unnoticed.
 
 ## Problems I hit (and fixed)
 
@@ -170,16 +195,36 @@ faithfulness judge, mean confidence 0.92.
    blocked reads for a minute, and multi-word topics were lost when seeding the
    graph from a question. All fixed.
 
+## What the review of this phase found
+
+An independent review of the phase's diff found no critical defects and seven
+important ones, all fixed with a test that failed first:
+
+1. The benchmark did not measure the search that `/ask` uses (see the results above).
+2. With Memgraph down, the three-way variant silently repeated the two-way one.
+   The suite now records the graph's status and how many passages it contributed,
+   and flags the run as degraded.
+3. A case whose expected article is not in the corpus was scored as a miss.
+4. Two labelled traces read identically to a judge (they differ only in their
+   citation list), so one judgement was counted twice. They are now scored by the
+   checks in code only.
+5. Scores did not record which judge gave them, and most online scores predated
+   the prompt changes.
+6. The citation parser crashed on brackets that are not citations, such as a date
+   `[2024-01-15]`: an `/ask` would have failed after the model had been paid.
+7. When re-extraction for an edited article stored its new claims and then failed
+   in a later step, the failure handler retired the claims it had just stored.
+
 ## Verification
 
 | Check | Result |
 |---|---|
-| `make check` | pass, 170 tests |
+| `make check` | pass, 205 tests |
 | `calibrate_judges.py --mode offline` | checks in code aligned, exit 0 |
-| `calibrate_judges.py --mode live` | all three evaluators aligned (table above), exit 0 |
+| `calibrate_judges.py --mode live` | all three evaluators above the thresholds in the latest run, exit 0 (see the caveat on run-to-run variance) |
 | `POST /ask` | `evaluate-answer` ran; `eval_results` row written; `snapshots.confidence` went from NULL to 1.0; `cp/answer.evaluated` sent |
 | Snapshot that does not exist | `status: skipped_missing_snapshot` |
-| `POST /evals/run` | four variants scored against the live corpus, stored in `eval_runs`, no expected article missing |
+| `POST /evals/run` | four variants scored against the live corpus through the production search, stored in `eval_runs`; no expected article missing, graph leg active (`degraded: false`) |
 | `GET /evals/latest`, `cp_eval_report` | pass rates, failure-mode counts, recent failures with the judge's reason, latest variant comparison |
 
 ## Next
