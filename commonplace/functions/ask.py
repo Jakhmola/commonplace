@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from commonplace.agents.prompts import ASK_SYSTEM_PROMPT
 from commonplace.agents.providers import call_llm, get_llm
-from commonplace.citations import NO_PASSAGES, cited_numbers
+from commonplace.citations import NO_PASSAGES, citation, cited, format_context
 from commonplace.config import settings
 from commonplace.db.queries import insert_cost, save_snapshot
 from commonplace.inngest_client import client
@@ -32,42 +32,6 @@ logger = logging.getLogger(__name__)
 # asyncio keeps only weak references to tasks, so a fire-and-forget task that
 # nothing holds can be garbage collected before it finishes.
 _background_tasks: set[asyncio.Task[None]] = set()
-
-
-def format_context(passages: list[dict[str, Any]]) -> str:
-    """Passages as numbered blocks; the numbers are what the answer cites.
-
-    A passage the claim graph led to also shows that claim and what kind of
-    statement it is, so the model can tell a measurement from an opinion.
-    """
-    blocks = []
-    for n, p in enumerate(passages, start=1):
-        author = p.get("author") or "Unknown"
-        lines = [f"[{n}] (Title: {p['title']} | Author: {author} | URL: {p['url']})"]
-        if p.get("claim_text"):
-            lines.append(f"Attributed claim ({p.get('claim_type') or 'claim'}): {p['claim_text']}")
-        lines.append(p["text"])
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)
-
-
-def _citation(n: int, passage: dict[str, Any]) -> dict[str, Any]:
-    citation = {
-        "citation_idx": n,
-        "passage_id": passage["passage_id"],
-        "title": passage["title"],
-        "author": passage.get("author"),
-        "url": passage["url"],
-    }
-    if passage.get("claim_id"):
-        citation |= {"claim_id": passage["claim_id"], "claim_type": passage.get("claim_type")}
-    return citation
-
-
-def cited(answer_text: str, passages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Citations for the passages the answer actually refers to."""
-    numbers = cited_numbers(answer_text)
-    return [_citation(n, p) for n, p in enumerate(passages, start=1) if n in numbers]
 
 
 async def synthesize(
@@ -150,7 +114,7 @@ async def ask_question(
             f"Retrieved {len(top)} relevant passages with hybrid search. "
             "Set ANTHROPIC_API_KEY to get an answer with inline citations."
         )
-        citations = [_citation(n, p) for n, p in enumerate(top, start=1)]
+        citations = [citation(n, p) for n, p in enumerate(top, start=1)]
     else:
         answer, usage = await synthesize(llm, question, top)
         citations = cited(answer, top)

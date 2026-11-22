@@ -73,6 +73,24 @@ class Settings(BaseSettings):
 
     synthesis_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
 
+    # --- Research agent ---
+    research_model: str = "claude-opus-5-5"
+    research_max_tokens: int = 16000
+    research_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    # Three bounds on one run. A request may ask for 1 to 5 hops; this is the default.
+    research_max_iterations: int = 3
+    # Dollars one run may spend before it stops searching and writes up what it has.
+    research_max_usd: float = 0.75
+    research_max_subqueries_per_hop: int = 3
+    research_passages_per_hop: int = 5
+    # Passages of the pool that the critic and the report get to see.
+    research_report_passages: int = 12
+    concurrency_research_runs: int = 2
+
+    # --- Weekly digest ---
+    digest_cron: str = "0 8 * * 1"  # Mondays 08:00 UTC
+    digest_lookback_days: int = 7
+
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
     embedding_batch_size: int = 96

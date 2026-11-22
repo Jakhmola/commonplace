@@ -40,6 +40,11 @@ def snapshot_id() -> str:
     return f"snap_{secrets.token_urlsafe(9)}"
 
 
+def research_id() -> str:
+    """`res_<12 url-safe chars>`: names one run of the research agent."""
+    return f"res_{secrets.token_urlsafe(9)}"
+
+
 _CLAIM_NAMESPACE = uuid.UUID("3f0d2a6e-58c1-4b7a-9e24-c1d7a905b6f3")
 
 

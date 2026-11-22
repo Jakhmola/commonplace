@@ -20,6 +20,10 @@ CLAIMS_EXTRACTED = "cp/claims.extracted"
 ANSWER_PRODUCED = "cp/answer.produced"
 ANSWER_EVALUATED = "cp/answer.evaluated"
 EVAL_RUN_REQUESTED = "cp/eval.run"
+RESEARCH_REQUESTED = "cp/research.requested"
+RESEARCH_COMPLETED = "cp/research.completed"
+DIGEST_REQUESTED = "cp/digest.requested"
+DIGEST_PUBLISHED = "cp/digest.published"
 
 DiscoverySource = Literal["rss", "backfill", "manual", "poll"]
 
@@ -100,6 +104,46 @@ class EvalRunRequested(BaseModel):
     """Anyone -> benchmark suite. Compare the retrieval variants on the golden questions."""
 
     suite_name: str = "golden_v1"
+
+
+class ResearchRequested(BaseModel):
+    """API -> research agent. One question to investigate over several searches.
+
+    The bounds are optional: a request that leaves them out gets the configured defaults.
+    """
+
+    research_id: str
+    question: str
+    max_iterations: int | None = None
+    max_usd: float | None = None
+
+
+class ResearchCompleted(BaseModel):
+    """Research agent -> whoever listens. How one run ended."""
+
+    research_id: str
+    status: str
+    stop_reason: str
+    iterations_used: int
+    total_cost_usd: float
+    confidence: float | None
+    failure_codes: list[str]
+
+
+class DigestRequested(BaseModel):
+    """Anyone -> digest. Write the digest now instead of waiting for Monday."""
+
+    lookback_days: int = 7
+
+
+class DigestPublished(BaseModel):
+    """Digest -> whoever listens. A digest for one window was stored."""
+
+    digest_id: UUID
+    window_start: datetime
+    window_end: datetime
+    article_count: int
+    claim_count: int
 
 
 def event(name: str, payload: BaseModel) -> inngest.Event:
