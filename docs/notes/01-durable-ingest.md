@@ -8,17 +8,17 @@ way that survives a crash halfway through, and search the result two ways.
 ## Plan
 
 ```
-POST /publications ──> cp/publication.added ──> add-publication ──> cp/article.discovered (x5)
-                                                 fetch-feed                      │
-                                                 save-publication                ▼
-                                                 find-new                  ingest-article
-                                                 fan-out                   check-allowlist
-                                                                           fetch-html
+POST /publications --> cp/publication.added --> add-publication --> cp/article.discovered (x5)
+                                                 match-allowlist                 |
+                                                 fetch-feed                      v
+                                                 upsert-publication        ingest-article
+                                                 discover                  check-allowlist
+                                                 emit                      fetch-html
                                                                            parse
                                                                            chunk
                                                                            embed      (the paid call)
                                                                            persist
-                                                                           emit ──> cp/article.ingested
+                                                                           emit --> cp/article.ingested
 ```
 
 The API never does slow work. It sends an event and hands back the event id;
@@ -31,34 +31,46 @@ a failure in `embed` must never re-fetch or re-parse the page.
 
 | Piece | Where |
 |---|---|
-| URL canonicalisation (`host/path`, no www, query, fragment, trailing slash) | `commonplace/sources/urls.py` |
+| URL normalisation and canonical ids (`pub:<publication>:<post-slug>`) | `commonplace/schemas/ids.py` |
+| Event names and payloads | `commonplace/schemas/events.py` |
 | Allowlist of feeds and hosts | `publications.yaml`, `commonplace/sources/allowlist.py` |
-| Polite fetch (User-Agent, robots.txt, timeout, 5 MB cap) | `commonplace/sources/fetch.py` |
+| Polite fetch (User-Agent, robots.txt, timeout, 5 MB cap) | `commonplace/sources/fetcher.py` |
 | Feed parsing (pointer only, never trusts feed content) | `commonplace/sources/rss.py` |
-| Article extraction (trafilatura) and content hash | `commonplace/sources/parse.py` |
-| Chunking: 1000 chars, 150 overlap, whitespace cuts only | `commonplace/sources/chunk.py` |
-| Embeddings (text-embedding-3-small, 1536 d) | `commonplace/sources/embed.py` |
-| Schema: publications, articles, passages, jobs, costs | `alembic/versions/0001_core.py` |
-| All SQL | `commonplace/db.py` |
+| Article extraction (trafilatura) and content hash | `commonplace/sources/parser.py` |
+| Chunking: 1000 chars, 150 overlap, whitespace cuts only | `commonplace/sources/chunking.py` |
+| Embeddings (text-embedding-3-small, 1536 d), packed vectors | `commonplace/sources/embedder.py` |
+| Tables (SQLAlchemy models) and migration | `commonplace/db/models.py`, `alembic/versions/0001_core.py` |
+| Every query | `commonplace/db/queries.py` |
+| Sparse and dense retrievers | `commonplace/retrieval/` |
+| Inngest client and cost capture | `commonplace/inngest_client.py` |
 | Inngest functions | `commonplace/functions/` |
-| API: `/publications`, `/jobs/{id}`, `/search`, `/health` | `commonplace/main.py` |
+| API: `/publications`, `/jobs/{id}`, `/search`, `/health` | `commonplace/main.py`, `commonplace/health.py` |
+
+Tables: `publications`, `articles`, `passages`, `cursors`, `jobs`, `costs`.
 
 Decisions worth remembering:
 
-- **The dedupe key is the cleaned URL** (`latent.space/p/formal-verification`), not a
-  per-publication slug. It needs no lookup, and the same shape works for local files
-  later (`file:<sha256>`).
-- **Jobs count, they don't track.** A job row stores the canonical ids it expects;
-  progress is `count(articles WHERE canonical_id = ANY(job.ids))` at read time. No
-  counter to keep in sync, no read-repair.
-- **Cost is logged in the same transaction as the passages.** A memoized `embed` step
-  is never re-run on replay, and `persist` commits once, so each real embedding call
-  is logged exactly once.
+- **The dedupe key is `pub:<publication>:<post-slug>`.** The publication comes from
+  the allowlist entry, not the URL's host, so a newsletter that lives on two domains
+  (Latent Space serves `www.latent.space` and links to `latent.space`) still gets one
+  id per post.
+- **The allowlist matches hosts exactly.** No wildcards and no `www.` stripping, so a
+  lookalike host or an unlisted subdomain is refused. A second domain has to be
+  listed on purpose (`archive_urls`).
+- **Jobs count, they don't track.** `ingest-article` never learns which job asked for
+  it, so nothing increments a counter. A job row stores the canonical ids it expects
+  and `done` is how many of them exist, recounted when the job is read.
+- **Cost capture is a middleware, not a call site concern.** Any step that returns a
+  dict with a `usage` key gets one `costs` row. A memoized step is never re-run on
+  replay, so its output never passes through the middleware twice.
+- **Passages carry `valid_from` / `valid_to`.** Nothing sets `valid_to` yet; searches
+  already filter on it so that superseding an edited article later needs no query
+  changes.
 - **No Inngest idempotency key.** Duplicates are already impossible (discovery skips
   stored ids, every write is an upsert), and an idempotency key would stop me
   re-sending an article on purpose.
-- **Passages keep the original text.** Search vectors are a generated `tsvector`
-  column with a GIN index; embeddings use an HNSW cosine index.
+- **At most 3 articles per publication at a time** (concurrency keyed on
+  `publication_id`), to stay polite to one server while other feeds keep moving.
 
 ## Problems I hit (and fixed)
 
@@ -82,67 +94,43 @@ Decisions worth remembering:
    worker alive and still serving. Ctrl+C in the terminal is fine; a hard kill has to
    target the process that owns the port.
 
+7. **A retrying run looked failed.** Between retries the dev server's REST API labels
+   a run `Failed` with no end time. `/jobs` now reports a failure only once the run
+   has actually ended.
+8. **The feed links to a host the allowlist did not have.** Latent Space's feed is on
+   `www.latent.space` but its article links use `latent.space`. Exact host matching
+   refused them, correctly; the bare domain is now listed under `archive_urls`.
+
 ## Verification
 
 | Check | Result |
 |---|---|
-| `make check` (ruff, format, mypy, pytest) | pass, 11 unit tests |
+| `make check` (ruff, format, mypy, pytest) | pass, 21 unit tests |
+| `alembic check` | models and migration agree |
 | `GET /health` | `database: ok, inngest: ok` |
-| `POST /publications` (Latent Space) then `GET /jobs/{id}` | `completed`, 5/5 articles, 234 passages |
-| Same publication again | `queued: 0`, counts unchanged, no new embedding calls |
+| `POST /publications` (Latent Space) then `GET /jobs/{id}` | `completed`, 5/5 articles, 234 passages, 5 `costs` rows |
+| Same publication again | `emitted: 0`, counts unchanged, no new embedding calls |
 | Feed not on the allowlist | job `failed` immediately with a clear message, no retries |
-| Provider outage (bad OpenAI key) | `embed` failed twice; after fixing the key the third attempt passed. `check-allowlist`, `fetch-html`, `parse`, `chunk` ran once each |
-| Real crash (SIGKILL during `embed` of the 114-passage post) | after restart only `embed`, `persist`, `emit` ran; counts back to 5 / 234 |
+| Real crash (SIGKILL while ingest steps were in flight) | 11 step calls before the kill, 29 after the restart: 40 in total, exactly what an uninterrupted ingest of 5 articles makes. No finished step ran twice; counts back to 5 / 234, 5 `costs` rows |
 
-Cost of the whole phase, including every re-ingest above: 8 embedding calls,
-110k tokens, **$0.0022**.
+Embedding the five posts costs 54k tokens, **$0.0011**.
 
-## Eval: sparse vs dense
+## Sparse vs dense, by hand
 
-Ten hand-written questions over the five posts, each with one article that answers it
-(`evals/queries_v1.yaml`). Half reuse the article's words (`keyword`), half say the
-same thing differently (`paraphrase`). Metric: does any of the top 5 passages come
-from the right article (hit@5), and how high (MRR).
+Trying both modes of `/search` on the same questions:
 
-```
-uv run python scripts/eval_retrieval.py
-```
+- **Sparse is all or nothing.** `websearch_to_tsquery` ANDs every term, so a passage
+  must contain all of them. "largest IPO in history beating SpaceX" matches nothing,
+  although each word is in the article. Any paraphrase fails the same way.
+- **Dense misses exact identifiers.** "SMT solver" is a precise term that sparse finds
+  and dense ranks low. Dense wins on meaning, sparse wins on rare exact tokens.
+- **Latency:** sparse answers in a few milliseconds; dense takes most of a second,
+  almost all of it the query embedding round trip.
 
-| mode | all hit@5 | all MRR | keyword hit@5 | keyword MRR | paraphrase hit@5 | paraphrase MRR |
-|---|---|---|---|---|---|---|
-| sparse | 0.40 | 0.35 | 0.80 | 0.70 | 0.00 | 0.00 |
-| dense | 0.80 | 0.68 | 0.80 | 0.80 | 0.80 | 0.55 |
-
-| query | sparse | dense |
-|---|---|---|
-| SMT solver used in production pipelines at Amazon | 1 | - |
-| how can engineers keep AI generated code from being low quality | - | 2 |
-| Lean proof of the Riemann Hypothesis | 2 | 1 |
-| famous unsolved math conjecture cracked with help from an AI model | - | 1 |
-| largest IPO in history beating SpaceX | - | 1 |
-| founders keep majority voting control after the company goes public | - | 1 |
-| why Linear never hired an SDR | 1 | 1 |
-| how much of the work in a project tracker is now created by AI agents | - | 4 |
-| Gemini 4 Neon price per million tokens | 1 | 1 |
-| Google mid-sized model named after a chemical element | - | - |
-
-Latency for one query: sparse 2 ms, dense 770 ms (almost all of it the query
-embedding round trip to OpenAI).
-
-What it says:
-
-- **Sparse is all or nothing.** `websearch_to_tsquery` ANDs every term, and a passage
-  must contain all of them. "largest IPO in history beating SpaceX" matches 0 passages,
-  although each word is in the article; the same terms OR'ed match 24. Every paraphrase
-  scores zero for the same reason. This is not BM25 either: `ts_rank_cd` has no IDF.
-- **Dense misses exact identifiers.** "SMT solver" is a precise term that only sparse
-  finds. Dense wins on meaning, sparse wins on rare exact tokens; neither alone is
-  enough, which is the case for fusing them next.
-- **Both missed** "chemical element": the article says "Neon (10)" and "atomic weights",
-  and no passage is close enough. A fair miss.
+Neither alone is enough, which is the case for fusing them next.
 
 ## Next
 
-Three feeds with flow control (concurrency per publication, a global throttle,
-priority for manual adds), hybrid search with reciprocal rank fusion, an OR-style
-sparse query, and `/ask` with citations.
+Three feeds with flow control (a global throttle, priority for manual adds), a
+backfill of each feed's archive, hybrid search with reciprocal rank fusion, and
+`/ask` with citations.

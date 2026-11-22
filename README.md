@@ -39,8 +39,6 @@ curl -X POST localhost:8000/publications -H 'content-type: application/json' \
 curl localhost:8000/jobs/<event_id>                      # progress
 curl 'localhost:8000/search?q=formal+verification&mode=sparse'
 curl 'localhost:8000/search?q=formal+verification&mode=dense'
-
-uv run python scripts/eval_retrieval.py                  # retrieval eval
 ```
 
 Feeds must be listed in [`publications.yaml`](publications.yaml).
