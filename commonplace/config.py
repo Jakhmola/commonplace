@@ -56,6 +56,19 @@ class Settings(BaseSettings):
     memgraph_password: str = ""
     graph_retrieval_limit: int = 15
 
+    # --- Evaluation ---
+    eval_judge_model: str = "claude-opus-5-5"
+    eval_judge_max_tokens: int = 8000
+    eval_judge_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
+    # Answer evaluations in flight at once.
+    concurrency_eval_runs: int = 2
+    eval_taxonomy_file: str = "evals/taxonomy.yaml"
+    eval_labeled_traces_file: str = "evals/labeled_traces.jsonl"
+    eval_benchmark_file: str = "evals/golden_benchmark.yaml"
+    # What an evaluator must reach against the labelled traces before its verdicts count.
+    eval_min_tpr: float = 0.90
+    eval_min_tnr: float = 0.90
+
     synthesis_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
 
     embedding_model: str = "text-embedding-3-small"

@@ -69,7 +69,7 @@ def _citation(n: int, passage: dict[str, Any]) -> dict[str, Any]:
 _BRACKETS = re.compile(r"\[\s*(\d+(?:\s*[,\-\u2013]\s*\d+)*)\s*\]")
 
 
-def _cited_numbers(answer_text: str) -> set[int]:
+def cited_numbers(answer_text: str) -> set[int]:
     """Passage numbers an answer refers to: [1], [1][2], [1, 2] and [1-3] all count."""
     numbers: set[int] = set()
     for group in _BRACKETS.findall(answer_text):
@@ -83,7 +83,7 @@ def _cited_numbers(answer_text: str) -> set[int]:
 
 def cited(answer_text: str, passages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Citations for the passages the answer actually refers to."""
-    numbers = _cited_numbers(answer_text)
+    numbers = cited_numbers(answer_text)
     return [_citation(n, p) for n, p in enumerate(passages, start=1) if n in numbers]
 
 
@@ -153,6 +153,10 @@ async def ask_question(
         session, question, limit=limit or settings.retrieval_limit
     )
     await session.commit()  # hand the connection back while the model writes its answer
+    for passage in top:
+        # `top` holds the same dicts as `candidates`: this marks, in the snapshot,
+        # which of the candidates the model was actually shown.
+        passage["in_prompt"] = True
 
     llm = get_llm()
     usage: dict[str, Any] | None = None

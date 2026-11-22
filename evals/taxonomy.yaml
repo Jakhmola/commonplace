@@ -1,0 +1,77 @@
+# The ways an answer from this knowledge base can be wrong.
+#
+# How this list was made: reading real traces (question, the passages the model
+# saw, the answer, its citations) and the rows in `failures`, writing a free-text
+# note on each one that looked off, then grouping the notes until the groups
+# stopped overlapping. Each group gets the cheapest evaluator that can catch it:
+# code where the failure is structural, a binary judge only where it takes reading.
+
+version: 1
+failure_modes:
+  - code: FM-1
+    slug: phantom_or_dangling_citation
+    layer: synthesis
+    evaluator: deterministic
+    description: >
+      The answer cites a number that does not correspond to a passage it was given,
+      or a citation points at a passage that was not retrieved for this question.
+    example: >
+      Five passages were in the prompt and the answer supports its key sentence with [7].
+
+  - code: FM-2
+    slug: superseded_source_cited
+    layer: retrieval
+    evaluator: deterministic
+    description: >
+      A cited passage or claim is no longer current: the article was edited and
+      this version of the text has been superseded.
+    example: >
+      The answer rests on a passage from the version of the post before the author
+      corrected a benchmark figure.
+
+  - code: FM-3
+    slug: ungrounded_answer_on_empty_or_thin_context
+    layer: synthesis
+    evaluator: deterministic, then the faithfulness judge
+    description: >
+      Nothing relevant was retrieved, or what was retrieved does not address the
+      question, and the answer responds anyway from general knowledge instead of
+      saying the library does not cover it. In its plain form the answer has no
+      citations at all.
+    example: >
+      A question about Kubernetes ingress controllers retrieves five passages about
+      model evaluation; the answer explains ingress controllers in three uncited paragraphs.
+
+  - code: FM-4
+    slug: unfaithful_claim_or_epistemic_inflation
+    layer: synthesis
+    evaluator: faithfulness judge
+    description: >
+      A statement in the answer is not supported by the passage it cites: a number
+      that is not there, a position attributed to the wrong author, or an opinion
+      or a prediction reported as if it had been measured.
+    example: >
+      The cited passage says the author expects open models to stay a few months
+      behind; the answer states "benchmarks show open models are six months behind [2]".
+
+  - code: FM-5
+    slug: missed_disagreement
+    layer: synthesis
+    evaluator: disagreement judge
+    description: >
+      The passages in the prompt include authors who take different positions on
+      the question, and the answer presents one of them as the settled view.
+    example: >
+      One author argues evaluation should lean on LLM judges, another that judges
+      are unreliable without verifiers; the answer recommends judges and cites only the first.
+
+  - code: FM-6
+    slug: retrieval_miss
+    layer: retrieval
+    evaluator: retrieval metrics on the golden benchmark
+    description: >
+      The article that answers the question is in the corpus but none of its
+      passages reached the top results, so no answer could have been right.
+    example: >
+      A question that uses an exact product name is answered from loosely related
+      passages because vector search ranked general prose above the one passage with the name.

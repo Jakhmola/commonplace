@@ -11,7 +11,9 @@ present an opinion or a prediction as something that was measured.
 - When sources genuinely disagree, or weigh the same trade-off differently, say so and cite \
 each side ("X argues ... [1], while Y finds ... [3]"). Do not invent a disagreement between \
 statements that are compatible.
-- If the passages do not cover the question, or only partly, say so plainly instead of guessing.
+- If none of the passages addresses the question, do not answer from memory: reply with one \
+sentence that begins "The retrieved passages do not cover" and says what is missing. If they \
+cover it only partly, answer that part with citations and say what is not covered.
 - Be direct and brief: a few sentences, or a short list when several things are asked for."""
 
 CLAIM_EXTRACTOR_SYSTEM_PROMPT = """\

@@ -6,7 +6,8 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from commonplace.db.queries import search_passages_bm25, store_passages
+from commonplace.db.queries import get_snapshot, search_passages_bm25, store_passages
+from commonplace.functions import ask
 from commonplace.retrieval import graph as graph_retrieval
 from commonplace.retrieval import hybrid
 from tests.integration.conftest import ARTICLE_URL, passages
@@ -99,3 +100,30 @@ async def test_graph_claims_come_back_as_the_passages_holding_their_quotes(
     assert hit["text"] == "the quokkazebra framework scales linearly"
     assert (hit["claim_id"], hit["claim_type"]) == ("c-1", "measurement")
     assert hit["url"] == ARTICLE_URL
+
+
+async def test_a_snapshot_marks_which_candidates_reached_the_prompt(
+    db: AsyncSession, article_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    texts = [f"quokkazebra note number {n}" for n in range(4)]
+    await store_passages(db, article_id=article_id, passages=passages(*texts))
+
+    async def provider_is_down(_: list[str]) -> dict[str, Any]:
+        raise RuntimeError("embedding provider is down")
+
+    async def no_announcement(*_: Any) -> None:
+        return None
+
+    monkeypatch.setattr(hybrid, "embed_texts", provider_is_down)
+    monkeypatch.setattr(ask, "get_llm", lambda: None)  # answer without calling the model
+    monkeypatch.setattr(ask, "_announce", no_announcement)
+
+    answer = await ask.ask_question(db, "quokkazebra", limit=2)
+    snapshot = await get_snapshot(db, answer["snapshot_id"])
+    assert snapshot is not None
+    # every candidate is kept, and the two the model would have seen are marked
+    assert len(snapshot.retrieved) == 4
+    assert [bool(r.get("in_prompt")) for r in snapshot.retrieved] == [True, True, False, False]
+    assert [c["passage_id"] for c in snapshot.citations] == [
+        r["passage_id"] for r in snapshot.retrieved[:2]
+    ]
