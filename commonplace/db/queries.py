@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Row, Select, func, select, update
+from sqlalchemy import Row, Select, func, select, true, update
 from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,8 @@ from commonplace.db.models import (
     Claim,
     Cost,
     Cursor,
+    EvalResult,
+    EvalRun,
     Failure,
     Job,
     Passage,
@@ -378,6 +380,7 @@ def _passage_hits(score: Any) -> Select[Any]:
             Article.author,
             Article.url,
             Article.published_at,
+            Article.canonical_id,
             score.label("rank"),
         )
         .join(Article, Article.id == Passage.article_id)
@@ -393,6 +396,7 @@ def _hit(row: Row[Any]) -> dict[str, Any]:
         "author": row.author,
         "url": row.url,
         "published_at": row.published_at.isoformat(),
+        "canonical_id": row.canonical_id,
         "rank": float(row.rank),
     }
 
@@ -416,7 +420,8 @@ _KEYWORD_SEARCH = sql_text("""
         ) AS frequency
         WHERE df > 0
     )
-    SELECT p.id, p.text, a.title, a.author, a.url, a.published_at, sum(w.idf) AS rank
+    SELECT p.id, p.text, a.title, a.author, a.url, a.published_at, a.canonical_id,
+           sum(w.idf) AS rank
     FROM weighted w
     JOIN passages p ON p.valid_to IS NULL AND p.tsv @@ w.term
     JOIN articles a ON a.id = p.article_id
@@ -693,3 +698,196 @@ async def get_source_provenance(
             "validity": _validity(passage),
         }
     return None
+
+
+# --- evaluation ---
+
+
+def _uuids(values: list[str]) -> list[uuid.UUID]:
+    """The values that are UUIDs; anything else cannot be a stored id and is dropped."""
+    parsed = []
+    for value in values:
+        try:
+            parsed.append(uuid.UUID(str(value)))
+        except ValueError:
+            continue
+    return parsed
+
+
+async def get_superseded_ids(
+    session: AsyncSession, *, passage_ids: list[str], claim_ids: list[str]
+) -> set[str]:
+    """Which of these passages and claims are no longer current."""
+    superseded: set[str] = set()
+    for model, ids in ((Passage, _uuids(passage_ids)), (Claim, _uuids(claim_ids))):
+        if ids:
+            stmt = select(model.id).where(model.id.in_(ids), model.valid_to.is_not(None))
+            superseded |= {str(found) for found in (await session.execute(stmt)).scalars()}
+    return superseded
+
+
+async def upsert_eval_result(
+    session: AsyncSession,
+    *,
+    snapshot_id: str,
+    deterministic_passed: bool,
+    checks: dict[str, bool],
+    faithfulness_verdict: str,
+    faithfulness_critique: str,
+    disagreement_verdict: str,
+    disagreement_critique: str,
+    failure_codes: list[str],
+    composite_score: float,
+) -> uuid.UUID:
+    """Record how a snapshot scored, replacing any earlier score, and put the
+    composite score on the snapshot as its confidence.
+    """
+    fields = {
+        "deterministic_passed": deterministic_passed,
+        "checks": checks,
+        "faithfulness_verdict": faithfulness_verdict,
+        "faithfulness_critique": faithfulness_critique,
+        "disagreement_verdict": disagreement_verdict,
+        "disagreement_critique": disagreement_critique,
+        "failure_codes": failure_codes,
+        "composite_score": composite_score,
+        # the moment of evaluation, not of the transaction's start
+        "created_at": func.clock_timestamp(),
+    }
+    stmt = (
+        insert(EvalResult)
+        .values(id=uuid.uuid4(), snapshot_id=snapshot_id, **fields)
+        .on_conflict_do_update(index_elements=[EvalResult.snapshot_id], set_=fields)
+        .returning(EvalResult.id)
+    )
+    eval_id = (await session.execute(stmt)).scalar_one()
+    await session.execute(
+        update(Snapshot)
+        .where(Snapshot.snapshot_id == snapshot_id)
+        .values(confidence=composite_score)
+    )
+    return eval_id
+
+
+async def upsert_eval_run(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    suite_name: str,
+    variants_summary: dict[str, Any],
+    case_results: list[dict[str, Any]],
+) -> str:
+    fields = {
+        "suite_name": suite_name,
+        "variants_summary": variants_summary,
+        "case_results": case_results,
+        "created_at": func.clock_timestamp(),
+    }
+    stmt = (
+        insert(EvalRun)
+        .values(run_id=run_id, **fields)
+        .on_conflict_do_update(index_elements=[EvalRun.run_id], set_=fields)
+    )
+    await session.execute(stmt)
+    return run_id
+
+
+def _rate(passed: int, judged: int) -> float | None:
+    return round(passed / judged, 4) if judged else None
+
+
+async def get_latest_eval_report(session: AsyncSession, limit: int = 10) -> dict[str, Any]:
+    """Where the system stands: how answers score, which failure modes occur, why
+    the latest failures failed, and how the retrieval variants compared last time.
+    """
+
+    def count_where(*conditions: Any) -> Any:
+        return func.count().filter(*conditions)
+
+    faith, disagree = EvalResult.faithfulness_verdict, EvalResult.disagreement_verdict
+    judged = ("PASS", "FAIL")  # SKIPPED and NOT_APPLICABLE are not judgements
+    totals = (
+        await session.execute(
+            select(
+                func.count().label("evaluated"),
+                count_where(EvalResult.deterministic_passed).label("deterministic_passed"),
+                count_where(faith.in_(judged)).label("faith_judged"),
+                count_where(faith == "PASS").label("faith_passed"),
+                count_where(disagree.in_(judged)).label("disagree_judged"),
+                count_where(disagree == "PASS").label("disagree_passed"),
+                func.avg(EvalResult.composite_score).label("mean_confidence"),
+            ).select_from(EvalResult)
+        )
+    ).one()
+
+    # One row per failure code per answer: the array is unnested next to its row.
+    each = (
+        func.jsonb_array_elements_text(EvalResult.failure_codes)
+        .table_valued("code")
+        .render_derived()
+    )
+    codes = await session.execute(
+        select(each.c.code, func.count())
+        .select_from(EvalResult)
+        .join(each, true())
+        .group_by(each.c.code)
+        .order_by(each.c.code)
+    )
+
+    failed = await session.execute(
+        select(EvalResult, Snapshot.question)
+        .join(Snapshot, Snapshot.snapshot_id == EvalResult.snapshot_id)
+        .where(EvalResult.composite_score < 1)
+        .order_by(EvalResult.created_at.desc())
+        .limit(limit)
+    )
+    recent_failures = []
+    for result, question in failed.all():
+        if result.faithfulness_verdict == "FAIL":
+            critique = result.faithfulness_critique
+        elif result.disagreement_verdict == "FAIL":
+            critique = result.disagreement_critique
+        else:
+            broken = sorted(name for name, ok in result.checks.items() if not ok)
+            critique = f"Deterministic checks failed: {', '.join(broken)}"
+        recent_failures.append(
+            {
+                "snapshot_id": result.snapshot_id,
+                "question": question,
+                "failure_codes": result.failure_codes,
+                "critique": critique,
+                "evaluated_at": result.created_at.isoformat(),
+            }
+        )
+
+    run = (
+        await session.execute(select(EvalRun).order_by(EvalRun.created_at.desc()).limit(1))
+    ).scalar_one_or_none()
+    by_function = await session.execute(
+        select(Failure.function_id, func.count()).group_by(Failure.function_id)
+    )
+    mean = totals.mean_confidence
+    return {
+        "answers": {
+            "evaluated": totals.evaluated,
+            "deterministic_pass_rate": _rate(totals.deterministic_passed, totals.evaluated),
+            "faithfulness_judged": totals.faith_judged,
+            "faithfulness_pass_rate": _rate(totals.faith_passed, totals.faith_judged),
+            "disagreement_judged": totals.disagree_judged,
+            "disagreement_pass_rate": _rate(totals.disagree_passed, totals.disagree_judged),
+            "mean_confidence": round(float(mean), 4) if mean is not None else None,
+        },
+        "failure_modes": {name: count for name, count in codes.all()},
+        "recent_failures": recent_failures,
+        "latest_run": (
+            {
+                "run_id": run.run_id,
+                "suite_name": run.suite_name,
+                "created_at": run.created_at.isoformat(),
+                "variants_summary": run.variants_summary,
+            }
+            if run
+            else None
+        ),
+        "recorded_failures": {function_id: count for function_id, count in by_function.all()},
+    }

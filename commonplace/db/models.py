@@ -212,3 +212,39 @@ class Claim(Base):
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # The claim from the previous version of the article that this one replaces.
     supersedes_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("claims.id"), nullable=True)
+
+
+class EvalResult(Base):
+    """How one answer scored: the checks in code, and the judges' verdicts with their reasons.
+
+    One row per snapshot. Evaluating a snapshot again replaces its row.
+    """
+
+    __tablename__ = "eval_results"
+
+    id: Mapped[uuid.UUID] = _pk()
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("snapshots.snapshot_id"), unique=True, nullable=False
+    )
+    deterministic_passed: Mapped[bool] = mapped_column(nullable=False)
+    checks: Mapped[dict[str, bool]] = mapped_column(JSONB, nullable=False, default=dict)
+    # PASS, FAIL, SKIPPED (no key) or NOT_APPLICABLE (nothing to judge)
+    faithfulness_verdict: Mapped[str] = mapped_column(String, nullable=False)
+    faithfulness_critique: Mapped[str] = mapped_column(Text, nullable=False)
+    disagreement_verdict: Mapped[str] = mapped_column(String, nullable=False)
+    disagreement_critique: Mapped[str] = mapped_column(Text, nullable=False)
+    failure_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    composite_score: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False, default=0.0)
+    created_at: Mapped[datetime] = _now()
+
+
+class EvalRun(Base):
+    """One run of the benchmark suite: a summary per retrieval variant, and every case."""
+
+    __tablename__ = "eval_runs"
+
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    suite_name: Mapped[str] = mapped_column(String, nullable=False)
+    variants_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    case_results: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = _now()

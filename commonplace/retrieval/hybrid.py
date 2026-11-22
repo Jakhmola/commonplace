@@ -30,6 +30,7 @@ class RetrievedCandidate:
     author: str | None
     url: str
     published_at: str
+    canonical_id: str | None = None  # the article's id
     rrf_score: float = 0.0
     sparse_rank: int | None = None
     sparse_score: float | None = None
@@ -74,7 +75,8 @@ def compute_rrf(
     def candidate(hit: dict[str, Any]) -> RetrievedCandidate:
         fields = ("passage_id", "text", "title", "author", "url", "published_at")
         return candidates.setdefault(
-            hit["passage_id"], RetrievedCandidate(**{f: hit[f] for f in fields})
+            hit["passage_id"],
+            RetrievedCandidate(**{f: hit[f] for f in fields}, canonical_id=hit.get("canonical_id")),
         )
 
     for rank, hit in enumerate(sparse_results, start=1):
