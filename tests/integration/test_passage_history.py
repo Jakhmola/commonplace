@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from commonplace.db.models import Passage
 from commonplace.db.queries import (
     count_current_passages,
+    count_passages,
     search_passages_bm25,
     store_passages,
     upsert_publication,
@@ -33,12 +34,15 @@ async def _found(session: AsyncSession, query: str) -> list[str]:
 async def test_an_edit_closes_old_passages_and_search_sees_only_the_new_ones(
     db: AsyncSession, article_id: uuid.UUID
 ) -> None:
+    corpus_before = await count_passages(db)
     await store_passages(
         db, article_id=article_id, passages=passages("quokkazebra one", "quokkazebra two")
     )
     assert await _found(db, "quokkazebra") == ["quokkazebra one", "quokkazebra two"]
 
     await store_passages(db, article_id=article_id, passages=passages("wombatokapi rewritten"))
+
+    assert await count_passages(db) == corpus_before + 1  # the corpus size is what is current
 
     assert await _all_rows(db, article_id) == 3  # history is kept
     assert await count_current_passages(db, article_id) == 1

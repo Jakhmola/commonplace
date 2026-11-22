@@ -211,7 +211,9 @@ async def count_articles(session: AsyncSession) -> int:
 
 
 async def count_passages(session: AsyncSession) -> int:
-    return (await session.execute(select(func.count()).select_from(Passage))).scalar_one()
+    """Passages that are current, which is what a search can return."""
+    stmt = select(func.count()).select_from(Passage).where(Passage.valid_to.is_(None))
+    return (await session.execute(stmt)).scalar_one()
 
 
 async def count_articles_for_publication(session: AsyncSession, publication_id: uuid.UUID) -> int:
