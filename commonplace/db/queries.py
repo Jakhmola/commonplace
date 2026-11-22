@@ -8,7 +8,7 @@ from sqlalchemy import Row, Select, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from commonplace.db.models import Article, Cost, Job, Passage, Publication
+from commonplace.db.models import Article, Cost, Job, Passage, Publication, Snapshot
 
 # --- publications ---
 
@@ -258,3 +258,36 @@ async def search_passages_dense(
         .limit(limit)
     )
     return [_hit(row) for row in (await session.execute(stmt)).all()]
+
+
+# --- snapshots ---
+
+
+async def save_snapshot(
+    session: AsyncSession,
+    *,
+    snapshot_id: str,
+    question: str,
+    answer_text: str,
+    citations: list[dict[str, Any]],
+    retrieved: list[dict[str, Any]],
+    retriever_variant: str,
+    as_of: datetime | None,
+    latency_ms: int,
+) -> None:
+    session.add(
+        Snapshot(
+            snapshot_id=snapshot_id,
+            question=question,
+            answer_text=answer_text,
+            citations=citations,
+            retrieved=retrieved,
+            retriever_variant=retriever_variant,
+            as_of=as_of,
+            latency_ms=latency_ms,
+        )
+    )
+
+
+async def get_snapshot(session: AsyncSession, snapshot_id: str) -> Snapshot | None:
+    return await session.get(Snapshot, snapshot_id)

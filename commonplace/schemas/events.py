@@ -14,6 +14,7 @@ from pydantic import BaseModel
 PUBLICATION_ADDED = "cp/publication.added"
 ARTICLE_DISCOVERED = "cp/article.discovered"
 ARTICLE_INGESTED = "cp/article.ingested"
+ANSWER_PRODUCED = "cp/answer.produced"
 
 DiscoverySource = Literal["rss", "backfill", "manual"]
 
@@ -44,6 +45,13 @@ class ArticleIngested(BaseModel):
     article_id: UUID
     content_hash: str
     passage_count: int
+
+
+class AnswerProduced(BaseModel):
+    """Ask -> whoever grades answers. Points at a stored snapshot."""
+
+    snapshot_id: str
+    retriever_variant: str
 
 
 def event(name: str, payload: BaseModel) -> inngest.Event:

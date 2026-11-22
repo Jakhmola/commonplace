@@ -5,10 +5,11 @@ Every write goes through an upsert in `queries.py`, so replaying any step is saf
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Computed, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, func
-from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from commonplace.config import settings
@@ -121,3 +122,28 @@ class Cost(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     est_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
     at: Mapped[datetime] = _now()
+
+
+class Snapshot(Base):
+    """One row per answer: the question, the answer, and every candidate passage
+    the retriever surfaced (not only the cited ones) with its rank in each engine.
+
+    With only the cited passages stored there is no telling "the right passage was
+    never retrieved" from "it was retrieved and ignored", and those need different fixes.
+    """
+
+    __tablename__ = "snapshots"
+    __table_args__ = (Index("ix_snapshots_created_at", "created_at"),)
+
+    snapshot_id: Mapped[str] = mapped_column(String, primary_key=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer_text: Mapped[str] = mapped_column(Text, nullable=False)
+    citations: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    retrieved: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    retriever_variant: Mapped[str] = mapped_column(String, nullable=False)
+    # Publication date of the newest source the answer rests on.
+    as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Written by the answer evaluators; NULL until an answer has been graded.
+    confidence: Mapped[float | None] = mapped_column(Numeric(5, 4), nullable=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = _now()

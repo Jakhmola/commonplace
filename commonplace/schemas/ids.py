@@ -5,6 +5,7 @@ the same post ever produced two ids, the post would be ingested (and paid
 for) twice.
 """
 
+import secrets
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -31,3 +32,8 @@ def canonical_id(publication_slug: str, url: str) -> str:
     if not segments:
         raise ValueError(f"URL has no path segment to use as a post slug: {url!r}")
     return f"pub:{publication_slug}:{segments[-1]}"
+
+
+def snapshot_id() -> str:
+    """`snap_<12 url-safe chars>`: names one answer, and everything recorded about it later."""
+    return f"snap_{secrets.token_urlsafe(9)}"

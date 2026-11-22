@@ -1,19 +1,29 @@
 """HTTP API. Slow work is an event (returns a handle at once); reads hit Postgres directly."""
 
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
 import inngest.fast_api
 from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
 
 from commonplace.config import settings
-from commonplace.db.queries import get_job_status
+from commonplace.db.queries import get_job_status, upsert_publication
 from commonplace.db.session import get_session
 from commonplace.functions import FUNCTIONS
 from commonplace.health import check_health
 from commonplace.inngest_client import client
-from commonplace.retrieval import dense, sparse
-from commonplace.schemas.events import PUBLICATION_ADDED, PublicationAdded, event
+from commonplace.retrieval import dense, hybrid, sparse
+from commonplace.schemas.events import (
+    ARTICLE_DISCOVERED,
+    PUBLICATION_ADDED,
+    ArticleDiscovered,
+    PublicationAdded,
+    event,
+)
+from commonplace.schemas.ids import canonical_id, clean_url
+from commonplace.sources.allowlist import PublicationEntry, assert_allowed, load_publications
 
 app = FastAPI(title="commonplace")
 inngest.fast_api.serve(app, client, FUNCTIONS)
@@ -71,6 +81,57 @@ async def add_publication(payload: PublicationAdded) -> dict[str, str]:
     return {"event_id": event_id, "trace_url": _trace_url(event_id), "status": "queued"}
 
 
+class ArticleManual(BaseModel):
+    url: str
+    title: str | None = None
+
+
+def resolve_manual_article(
+    url: str, publications: list[PublicationEntry]
+) -> tuple[PublicationEntry, str]:
+    """(publication, canonical id) for a hand-submitted URL, or ValueError if it is unusable."""
+    pub = assert_allowed(url, publications)
+    return pub, canonical_id(pub.slug, url)
+
+
+@app.post("/articles")
+async def add_article(payload: ArticleManual) -> dict[str, Any]:
+    """Ingest one article now, ahead of any queued backfill.
+
+    The event carries `via="manual"`, which the priority expression on
+    `ingest-article` turns into a head start: the run takes the next free slot
+    for its publication. The URL's host must be on the allowlist.
+    """
+    try:
+        pub, cid = resolve_manual_article(payload.url, load_publications())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    async with get_session() as session:
+        publication_id = await upsert_publication(
+            session, slug=pub.slug, name=pub.name, feed_url=pub.feed_url, homepage=pub.homepage
+        )
+        await session.commit()
+
+    discovered = ArticleDiscovered(
+        canonical_id=cid,
+        publication_id=publication_id,
+        url=clean_url(payload.url),
+        # Empty unless the caller names it: ingest then falls back to the page's own title.
+        title=payload.title or "",
+        # A fallback only: the parse step prefers the date on the page.
+        published_at=datetime.now(UTC),
+        via="manual",
+    )
+    (event_id,) = await client.send(event(ARTICLE_DISCOVERED, discovered))
+    return {
+        "event_id": event_id,
+        "trace_url": _trace_url(event_id),
+        "status": "queued",
+        "priority_offset_s": settings.priority_manual_s,
+    }
+
+
 @app.get("/jobs/{event_id}")
 async def job_status(event_id: str) -> dict[str, Any]:
     """Our own job row (article counts) combined with Inngest's status for the run."""
@@ -96,11 +157,13 @@ async def job_status(event_id: str) -> dict[str, Any]:
 @app.get("/search")
 async def search(
     q: str = Query(min_length=1),
-    mode: Literal["sparse", "dense"] = "sparse",
+    mode: Literal["hybrid", "sparse", "dense"] = "hybrid",
     limit: int = Query(default=5, ge=1, le=25),
 ) -> dict[str, Any]:
-    """Two retrievers, queried on their own: keyword rank or embedding similarity."""
-    retriever = sparse if mode == "sparse" else dense
+    """Passages for a query, no LLM. `hybrid` fuses the two engines by rank;
+    `sparse` and `dense` ask one engine each, to compare all three on one query.
+    """
+    retriever = {"hybrid": hybrid, "sparse": sparse, "dense": dense}[mode]
     async with get_session() as session:
         results = await retriever.search(session, q, limit)
     return {"mode": mode, "results": results}
