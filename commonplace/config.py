@@ -21,8 +21,25 @@ class Settings(BaseSettings):
     chunk_size: int = 1000
     chunk_overlap: int = 150
     publications_file: str = "publications.yaml"
-    # How many of a feed's newest entries add-publication ingests.
-    discovery_limit: int = 5
+    # backfill-publication sends cp/article.discovered in batches of this size.
+    backfill_batch_size: int = 25
+
+    # --- Flow control on ingest-article ---
+    # Articles of the same publication in flight at once.
+    concurrency_per_publication: int = 3
+    # Runs that may start per minute across all publications. One run makes about
+    # one embedding request, so this is roughly "embedding requests per minute".
+    ingest_runs_per_minute: int = 50
+    # Inngest priority is a time shift in seconds (-600..600), not a rank: a manual
+    # run is queued as if it had arrived 600 s earlier, a backfill run 600 s later.
+    priority_manual_s: int = 600
+    priority_backfill_s: int = -600
+
+    # --- Retrieval and answers ---
+    rrf_k: int = 60
+    retrieval_limit: int = 5
+    synthesis_model: str = "claude-sonnet-5-5"
+    synthesis_max_tokens: int = 1024
 
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536

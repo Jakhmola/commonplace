@@ -4,8 +4,16 @@ Seven steps, each memoized by Inngest. If `embed` (the paid call) fails, a
 retry replays the function but `fetch-html`, `parse` and `chunk` return their
 recorded results instantly: the page is not fetched again and nothing upstream
 is paid for twice. Every write is an upsert, so re-sending the event is safe.
+
+Flow control is configuration on the function, enforced in Inngest's queue
+before any of this code runs: concurrency per publication, a global throttle
+on run starts, and a priority that lets manual articles overtake a backfill.
+
+There is deliberately no idempotency key: it would refuse a re-send of the
+same article for 24 hours, and re-sending is how a failed article is retried.
 """
 
+from datetime import timedelta
 from typing import Any
 
 import inngest
@@ -31,9 +39,23 @@ from commonplace.sources.parser import ParsedArticle, parse_html
 @client.create_function(
     fn_id="ingest-article",
     trigger=inngest.TriggerEvent(event=ARTICLE_DISCOVERED),
-    # At most 3 articles of one publication at a time: polite to its server,
-    # and one large feed cannot starve the others.
-    concurrency=[inngest.Concurrency(key="event.data.publication_id", limit=3)],
+    # One limit per publication: never more than N requests at a time against one
+    # site, and one large backfill cannot starve the other feeds.
+    concurrency=[
+        inngest.Concurrency(
+            key="event.data.publication_id", limit=settings.concurrency_per_publication
+        )
+    ],
+    # No key: the embedding quota is shared, so the limit is too. Throttle limits
+    # run starts, and each run embeds its whole article in about one request.
+    throttle=inngest.Throttle(limit=settings.ingest_runs_per_minute, period=timedelta(minutes=1)),
+    # Manual articles are queued as if they had arrived earlier, backfill later.
+    priority=inngest.Priority(
+        run=(
+            f"event.data.via == 'manual' ? {settings.priority_manual_s} "
+            f": {settings.priority_backfill_s}"
+        )
+    ),
     retries=3,
 )
 async def ingest_article(ctx: inngest.Context) -> dict[str, object]:
