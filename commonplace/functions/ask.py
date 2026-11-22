@@ -18,8 +18,10 @@ from typing import Any
 import anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from commonplace.agents.prompts import ASK_SYSTEM_PROMPT
+from commonplace.agents.providers import call_llm, get_llm
 from commonplace.config import settings
-from commonplace.db.queries import save_snapshot
+from commonplace.db.queries import insert_cost, save_snapshot
 from commonplace.inngest_client import client
 from commonplace.retrieval.hybrid import hybrid_search
 from commonplace.schemas.events import ANSWER_PRODUCED, AnswerProduced, event
@@ -27,31 +29,11 @@ from commonplace.schemas.ids import snapshot_id
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """\
-You answer questions using passages retrieved from a personal library of AI engineering \
-newsletters.
-
-- Use only what the numbered passages say. Do not add facts from memory.
-- Cite every claim inline with the number of the passage it comes from, like [1] or [2][4].
-- If the passages do not cover the question, or only partly, say so plainly instead of guessing.
-- Be direct and brief: a few sentences, or a short list when several things are asked for."""
-
 NO_PASSAGES = "No relevant passages were found in the knowledge base for this question."
 
-_llm: anthropic.AsyncAnthropic | None = None
 # asyncio keeps only weak references to tasks, so a fire-and-forget task that
 # nothing holds can be garbage collected before it finishes.
 _background_tasks: set[asyncio.Task[None]] = set()
-
-
-def get_llm() -> anthropic.AsyncAnthropic | None:
-    """The Anthropic client, or None when no key is configured."""
-    global _llm
-    if not settings.anthropic_api_key:
-        return None
-    if _llm is None:
-        _llm = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return _llm
 
 
 def format_context(passages: list[dict[str, Any]]) -> str:
@@ -96,9 +78,11 @@ def cited(answer_text: str, passages: list[dict[str, Any]]) -> list[dict[str, An
 
 async def synthesize(
     llm: anthropic.AsyncAnthropic, question: str, passages: list[dict[str, Any]]
-) -> str:
-    """One Claude call. A provider failure becomes the answer text, never an HTTP error:
-    the passages were still retrieved and the snapshot is still worth keeping.
+) -> tuple[str, dict[str, Any] | None]:
+    """(answer text, usage of the call or None if nothing was billed).
+
+    A failure becomes the answer text, never an HTTP error: the passages were
+    still retrieved and the snapshot is still worth keeping.
     """
     prompt = (
         f"Passages:\n\n{format_context(passages)}\n\n"
@@ -106,29 +90,27 @@ async def synthesize(
         "Answer the question from the passages, citing them inline."
     )
     try:
-        response = await llm.beta.messages.create(
+        result = await call_llm(
+            system_prompt=ASK_SYSTEM_PROMPT,
+            user_input=prompt,
             model=settings.synthesis_model,
             max_tokens=settings.synthesis_max_tokens,
             # Someone is waiting on this answer; grounded Q&A needs little deliberation.
-            output_config={"effort": settings.synthesis_effort},
-            # If the model declines, the API re-runs the request on a fallback model.
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
+            effort=settings.synthesis_effort,
+            llm=llm,
         )
     except Exception as exc:
         # Not only API errors: the SDK also raises plain exceptions before sending.
         logger.exception("LLM synthesis failed")
-        return f"LLM synthesis failed ({type(exc).__name__}): {exc}"
+        return f"LLM synthesis failed ({type(exc).__name__}): {exc}", None
 
-    if response.stop_reason == "refusal":
-        return "The model declined to answer this question."
-    text = "\n\n".join(block.text for block in response.content if block.type == "text")
-    if not text:
+    if result["stop_reason"] == "refusal":
+        return "The model declined to answer this question.", result["usage"]
+    if not result["output"]:
         # e.g. max_tokens spent before any answer was written
-        return f"The model returned no answer (stop reason: {response.stop_reason})."
-    return text
+        answer = f"The model returned no answer (stop reason: {result['stop_reason']})."
+        return answer, result["usage"]
+    return result["output"], result["usage"]
 
 
 def _newest(passages: list[dict[str, Any]]) -> datetime | None:
@@ -162,6 +144,7 @@ async def ask_question(
     await session.commit()  # hand the connection back while the model writes its answer
 
     llm = get_llm()
+    usage: dict[str, Any] | None = None
     if not top:
         answer, citations = NO_PASSAGES, []
     elif llm is None:
@@ -171,7 +154,7 @@ async def ask_question(
         )
         citations = [_citation(n, p) for n, p in enumerate(top, start=1)]
     else:
-        answer = await synthesize(llm, question, top)
+        answer, usage = await synthesize(llm, question, top)
         citations = cited(answer, top)
 
     # How fresh the answer is: the newest source it cites, else the newest retrieved.
@@ -196,6 +179,15 @@ async def ask_question(
         as_of=as_of,
         latency_ms=latency_ms,
     )
+    if usage is not None:
+        # Not inside an Inngest step, so the cost middleware never sees this call.
+        await insert_cost(
+            session,
+            model=usage["model"],
+            input_tokens=usage["input_tokens"],
+            output_tokens=usage["output_tokens"],
+            est_usd=usage["est_usd"],
+        )
     await session.commit()
 
     task = asyncio.create_task(_announce(sid, retriever_variant))

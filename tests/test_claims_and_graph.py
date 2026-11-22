@@ -4,10 +4,19 @@ No Docker or keys needed. Tests that need Postgres or Memgraph live in tests/int
 """
 
 import uuid
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from commonplace.agents import core
+from commonplace.agents.core import run_agent
+from commonplace.agents.providers import estimate_cost_usd
+from commonplace.agents.roles.extractor import (
+    claim_extractor,
+    format_extractor_prompt,
+    heuristic_extract_claims,
+)
 from commonplace.graph.ontology import (
     EDGE_TYPES,
     NODE_LABELS,
@@ -16,7 +25,7 @@ from commonplace.graph.ontology import (
     normalize_topics,
     slugify,
 )
-from commonplace.schemas.entities import RawExtractedClaim
+from commonplace.schemas.entities import ClaimExtractionBatch, RawExtractedClaim
 from commonplace.schemas.ids import claim_id
 from commonplace.sources.quote_validator import find_verbatim, validate_and_normalize_claims
 
@@ -40,6 +49,9 @@ def test_plurals_collapse_and_generic_words_are_rejected() -> None:
     assert normalize_topic("coding agent").slug == "coding-agent"  # type: ignore[union-attr]
     assert normalize_topic("open weights").name == "Open Weight"  # type: ignore[union-attr]
     assert normalize_topic("analytics").slug == "analytics"  # type: ignore[union-attr]
+    # names that merely end in "s" are left alone; plural acronyms are not
+    assert normalize_topic("Synopsys").slug == "synopsys"  # type: ignore[union-attr]
+    assert normalize_topic("GPUs").slug == "gpu"  # type: ignore[union-attr]
     for generic in ("AI", "models", "system", "data", "  ", "x"):
         assert normalize_topic(generic) is None, generic
 
@@ -149,3 +161,89 @@ def test_claim_types_are_a_closed_set() -> None:
             claim_type="rumour",
             entities=["Inngest"],
         )
+
+
+# --- the agent layer: one LLM call, inside one durable step, validated ---
+
+
+class _Step:
+    """Stands in for `ctx.step`: runs the callable and remembers the step ids."""
+
+    def __init__(self) -> None:
+        self.ids: list[str] = []
+
+    async def run(self, step_id: str, fn: Any) -> Any:
+        self.ids.append(step_id)
+        return await fn()
+
+
+async def test_run_agent_runs_inside_a_step_and_validates_the_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def fake_call_llm(**kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        claim = {
+            "claim_text": "Steps are memoized",
+            "quote_span": "every step that already finished returns its recorded result",
+            "claim_type": "measurement",
+            "entities": ["Durable Execution"],
+        }
+        usage = {"model": "m", "input_tokens": 1200, "output_tokens": 80, "est_usd": 0.0064}
+        return {"output": {"claims": [claim]}, "usage": usage, "stop_reason": "end_turn"}
+
+    monkeypatch.setattr(core, "call_llm", fake_call_llm)
+    step = _Step()
+    batch = await run_agent(step, claim_extractor, "the article", "extract-claims-llm", ARTICLE_ID)
+
+    assert step.ids == ["extract-claims-llm"]  # memoized by Inngest, and its usage is captured
+    assert isinstance(batch, ClaimExtractionBatch)
+    assert batch.claims[0].claim_type == "measurement"
+    assert seen["output_schema"] is ClaimExtractionBatch
+    assert seen["system_prompt"] == claim_extractor.system_prompt
+    assert seen["article_id"] == ARTICLE_ID
+
+
+async def test_run_agent_rejects_output_that_does_not_fit_the_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_call_llm(**_: Any) -> dict[str, Any]:
+        return {"output": {"claims": [{"claim_text": "x"}]}, "usage": {}, "stop_reason": "end_turn"}
+
+    monkeypatch.setattr(core, "call_llm", fake_call_llm)
+    with pytest.raises(ValidationError):
+        await run_agent(_Step(), claim_extractor, "the article", "extract-claims-llm")
+
+
+def test_cost_is_estimated_from_the_model_price_table() -> None:
+    # 1M input + 1M output at the listed prices
+    assert estimate_cost_usd("claude-opus-5-5", 1_000_000, 1_000_000) == pytest.approx(24.0)
+    assert estimate_cost_usd("claude-haiku-5-5", 2_000_000, 0) == pytest.approx(0.20)
+    # an unknown model is priced like the default one rather than as free
+    assert estimate_cost_usd("some-future-model", 1_000_000, 0) == pytest.approx(4.0)
+
+
+def test_extractor_prompt_carries_title_author_and_text() -> None:
+    prompt = format_extractor_prompt(
+        title="Why durable steps matter",
+        author=None,
+        publication_name="Latent Space",
+        article_text=ARTICLE,
+    )
+    assert "Publication: Latent Space" in prompt and "Title: Why durable steps matter" in prompt
+    assert "Author: Unknown" in prompt and prompt.endswith(ARTICLE)
+
+
+def test_the_heuristic_extractor_quotes_real_sentences() -> None:
+    text = (
+        "Retrieval augmented generation is still the default for grounding answers. "
+        "Nothing here mentions a known topic at all, only weather. "
+        "In our runs, fine-tuning cut latency by 40% on the same hardware. "
+        "We think coding agents will write most pull requests within two years."
+    )
+    batch = heuristic_extract_claims(text)
+    assert [c.claim_type for c in batch.claims] == ["opinion", "measurement", "prediction"]
+    for claim in batch.claims:
+        assert find_verbatim(text, claim.quote_span) == claim.quote_span  # passes the guardrail
+    assert batch.claims[0].entities == ["RAG"]

@@ -150,7 +150,11 @@ def slugify(raw: str) -> str:
 
 
 def _singular(word: str) -> str:
-    if len(word) <= 3 or word in _NOT_PLURAL or word.endswith(("ss", "us", "is", "ics")):
+    if word[:-1] in _ACRONYMS and word.endswith("s"):
+        return word[:-1]  # "gpus", "llms"
+    # Endings that usually belong to a singular word or a name: "status", "analysis",
+    # "physics", "synopsys".
+    if len(word) <= 3 or word in _NOT_PLURAL or word.endswith(("ss", "us", "is", "ics", "ys")):
         return word
     if word.endswith("ies"):
         return word[:-3] + "y"

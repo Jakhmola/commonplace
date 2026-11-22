@@ -192,7 +192,8 @@ class _FailingLLM:
 
 
 async def test_llm_failure_becomes_the_answer_text() -> None:
-    answer = await synthesize(_FailingLLM(), "What is throttling?", PASSAGES)  # type: ignore[arg-type]
+    answer, usage = await synthesize(_FailingLLM(), "What is throttling?", PASSAGES)  # type: ignore[arg-type]
+    assert usage is None  # nothing was billed
     assert answer.startswith("LLM synthesis failed (APIConnectionError)")
     assert cited(answer, PASSAGES) == []  # a failed answer cites nothing
 
@@ -257,14 +258,16 @@ class _LLM:
 async def test_any_exception_from_the_llm_becomes_the_answer_text() -> None:
     # The SDK also raises plain errors, e.g. ValueError when max_tokens needs streaming.
     llm: Any = _LLM(error=ValueError("Streaming is required"))
-    answer = await synthesize(llm, "What is throttling?", PASSAGES)
+    answer, _ = await synthesize(llm, "What is throttling?", PASSAGES)
     assert answer == "LLM synthesis failed (ValueError): Streaming is required"
 
 
 async def test_a_response_without_text_is_reported_not_returned_empty() -> None:
-    llm: Any = _LLM(response=SimpleNamespace(stop_reason="max_tokens", content=[]))
-    answer = await synthesize(llm, "What is throttling?", PASSAGES)
+    spent = SimpleNamespace(input_tokens=900, output_tokens=8000)
+    llm: Any = _LLM(response=SimpleNamespace(stop_reason="max_tokens", content=[], usage=spent))
+    answer, usage = await synthesize(llm, "What is throttling?", PASSAGES)
     assert "max_tokens" in answer and cited(answer, PASSAGES) == []
+    assert usage is not None and usage["output_tokens"] == 8000  # billed even without an answer
 
 
 def test_a_manual_url_must_be_http() -> None:

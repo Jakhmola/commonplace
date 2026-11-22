@@ -45,6 +45,17 @@ class Settings(BaseSettings):
     synthesis_model: str = "claude-opus-5-5"
     # Thinking tokens count against this too, so it is a ceiling, not a target length.
     synthesis_max_tokens: int = 8000
+    # --- Claim extraction and the graph ---
+    extraction_model: str = "claude-opus-5-5"
+    extraction_max_tokens: int = 16000
+    extraction_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    # Extraction runs in flight at once, across all articles.
+    concurrency_extract_claims: int = 2
+    memgraph_uri: str = "bolt://localhost:7687"
+    memgraph_user: str = ""
+    memgraph_password: str = ""
+    graph_retrieval_limit: int = 15
+
     synthesis_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
 
     embedding_model: str = "text-embedding-3-small"
