@@ -71,10 +71,29 @@ curl -X POST localhost:8288/e/dev -H 'content-type: application/json' \
 Feeds must be listed in [`publications.yaml`](publications.yaml). `/ask` needs
 `ANTHROPIC_API_KEY`; without it the retrieved passages are returned on their own.
 
+## Evaluation
+
+Every answer is scored shortly after it is given: checks in code, then two binary
+judges (faithfulness, and disagreement coverage). The score becomes the answer's
+`confidence`.
+
+```bash
+curl localhost:8000/evals/latest                           # pass rates, failure modes, recent failures
+curl -X POST localhost:8000/evals/run                      # compare the four retrieval variants
+
+uv run python scripts/calibrate_judges.py --mode offline   # the checks in code against labelled traces
+uv run python scripts/calibrate_judges.py --mode live      # also the judges (about 25 model calls)
+```
+
+The failure modes are defined in [`evals/taxonomy.yaml`](evals/taxonomy.yaml), the
+benchmark questions in [`evals/golden_benchmark.yaml`](evals/golden_benchmark.yaml).
+Results and their caveats are in
+[`docs/notes/05-evaluation.md`](docs/notes/05-evaluation.md).
+
 ## Using it from Claude Code (MCP)
 
 `cp-mcp` serves the knowledge base as MCP tools over stdio: `cp_search`, `cp_ask`,
-`cp_sources`, `cp_list_publications`, `cp_job_status`, `cp_health`,
+`cp_sources`, `cp_eval_report`, `cp_list_publications`, `cp_job_status`, `cp_health`,
 `cp_add_publication`, `cp_backfill` and `cp_sync`. [`.mcp.json`](.mcp.json) registers it for Claude Code
 when Claude Code is started in this directory (it asks once before enabling it).
 From anywhere else:
