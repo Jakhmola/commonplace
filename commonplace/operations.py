@@ -6,6 +6,7 @@ Slow work is sent to Inngest as an event and returns a handle at once; reads
 go straight to Postgres.
 """
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,6 +18,7 @@ import openai
 from commonplace.config import settings
 from commonplace.db.queries import (
     get_job_status,
+    get_source_provenance,
     list_publications_with_stats,
     upsert_publication,
 )
@@ -236,3 +238,16 @@ async def ask(question: str, limit: int | None = None) -> dict[str, Any]:
 async def list_publications() -> list[dict[str, Any]]:
     async with get_session() as session:
         return await list_publications_with_stats(session)
+
+
+async def get_source(claim_or_passage_id: str) -> dict[str, Any]:
+    """Trace a cited claim or passage to its article, exact text and validity."""
+    try:
+        target = uuid.UUID(claim_or_passage_id.strip())
+    except ValueError as exc:
+        raise OperationError(400, f"Not a valid id: {claim_or_passage_id!r}") from exc
+    async with get_session() as session:
+        source = await get_source_provenance(session, target)
+    if source is None:
+        raise OperationError(404, f"No claim or passage has the id {claim_or_passage_id!r}")
+    return source

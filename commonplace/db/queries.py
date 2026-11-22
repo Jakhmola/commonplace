@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from commonplace.db.models import (
     Article,
+    Claim,
     Cost,
     Cursor,
     Failure,
@@ -493,3 +494,202 @@ async def save_snapshot(
 
 async def get_snapshot(session: AsyncSession, snapshot_id: str) -> Snapshot | None:
     return await session.get(Snapshot, snapshot_id)
+
+
+# --- claims ---
+
+
+async def get_article_with_publication(
+    session: AsyncSession, article_id: uuid.UUID
+) -> tuple[Article, Publication] | None:
+    stmt = (
+        select(Article, Publication)
+        .join(Publication, Publication.id == Article.publication_id)
+        .where(Article.id == article_id)
+    )
+    row = (await session.execute(stmt)).first()
+    return (row[0], row[1]) if row else None
+
+
+async def count_active_claims(session: AsyncSession) -> int:
+    stmt = select(func.count()).select_from(Claim).where(Claim.valid_to.is_(None))
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def get_active_claims_for_article(
+    session: AsyncSession, article_id: uuid.UUID
+) -> list[Claim]:
+    stmt = select(Claim).where(Claim.article_id == article_id, Claim.valid_to.is_(None))
+    return list((await session.execute(stmt)).scalars())
+
+
+async def get_article_ids_without_claims(
+    session: AsyncSession, limit: int | None = None
+) -> list[Article]:
+    """Stored articles that have no current claims, oldest first."""
+    has_claims = select(Claim.id).where(Claim.article_id == Article.id, Claim.valid_to.is_(None))
+    stmt = select(Article).where(~has_claims.exists()).order_by(Article.published_at).limit(limit)
+    return list((await session.execute(stmt)).scalars())
+
+
+async def persist_article_claims(
+    session: AsyncSession, *, article_id: uuid.UUID, claims: list[dict[str, Any]], now: datetime
+) -> list[dict[str, str]]:
+    """Make `claims` the article's current claims.
+
+    Current claims that are not in the new set belong to an older version of
+    the article and are closed. The new set is upserted by id, so a replay
+    writes nothing new. Returns `[{new_claim_id, old_claim_id, at}]`: a new
+    claim supersedes a closed one when they share a topic.
+    """
+    incoming = {uuid.UUID(c["claim_id"]) for c in claims}
+    stale = [
+        old
+        for old in await get_active_claims_for_article(session, article_id)
+        if old.id not in incoming
+    ]
+    if stale:
+        await session.execute(
+            update(Claim).where(Claim.id.in_([old.id for old in stale])).values(valid_to=now)
+        )
+    closed_by_topic = {entity["slug"]: old.id for old in stale for entity in old.entities}
+
+    pairs: list[dict[str, str]] = []
+    for claim in claims:
+        cid = uuid.UUID(claim["claim_id"])
+        topics = [{"slug": t["slug"], "name": t["name"]} for t in claim["topics"]]
+        supersedes = next(
+            (closed_by_topic[t["slug"]] for t in topics if t["slug"] in closed_by_topic), None
+        )
+        if supersedes is not None:
+            pairs.append(
+                {"new_claim_id": str(cid), "old_claim_id": str(supersedes), "at": now.isoformat()}
+            )
+        fields = {
+            "text": claim["text"],
+            "quote_span": claim["quote_span"],
+            "claim_type": claim["claim_type"],
+            "entities": topics,
+            "confidence": claim.get("confidence", 0.9),
+        }
+        stmt = insert(Claim).values(
+            id=cid, article_id=article_id, valid_from=now, supersedes_id=supersedes, **fields
+        )
+        await session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[Claim.id],
+                set_={
+                    **fields,
+                    "valid_to": None,
+                    # On a replay nothing is stale any more, so there is no link to
+                    # compute: keep the one recorded the first time.
+                    "supersedes_id": func.coalesce(
+                        stmt.excluded.supersedes_id, Claim.supersedes_id
+                    ),
+                },
+            )
+        )
+    return pairs
+
+
+async def find_matching_passage_for_quote(
+    session: AsyncSession, *, article_id: uuid.UUID, quote_span: str
+) -> dict[str, Any] | None:
+    """The article's current passage that contains `quote_span`.
+
+    Passages are cut at about 1000 characters, so a quote can straddle two of
+    them: then the passage holding the start of the quote is used, and failing
+    that the article's first passage. None only if the article has no passages.
+    """
+    stmt = (
+        _passage_hits(Passage.chunk_index)
+        .where(Passage.article_id == article_id)
+        .order_by(Passage.chunk_index)
+    )
+    rows = (await session.execute(stmt)).all()
+    if not rows:
+        return None
+
+    def squash(value: str) -> str:
+        return " ".join(value.split()).lower()
+
+    quote = squash(quote_span)
+    texts = [squash(row.text) for row in rows]
+    for needle in (quote, quote[:60]):
+        for row, haystack in zip(rows, texts, strict=True):
+            if needle in haystack:
+                return _hit(row) | {"rank": 1.0}
+    return _hit(rows[0]) | {"rank": 1.0}
+
+
+def _article_source(article: Article, publication: Publication) -> dict[str, Any]:
+    return {
+        "article": {
+            "article_id": str(article.id),
+            "canonical_id": article.canonical_id,
+            "title": article.title,
+            "url": article.url,
+            "published_at": article.published_at.isoformat(),
+            "content_hash": article.content_hash,
+        },
+        "publication": {
+            "slug": publication.slug,
+            "name": publication.name,
+            "homepage": publication.homepage,
+        },
+        "author": article.author or "Unknown",
+    }
+
+
+def _validity(row: Claim | Passage, supersedes_id: uuid.UUID | None = None) -> dict[str, Any]:
+    return {
+        "valid_from": row.valid_from.isoformat(),
+        "valid_to": row.valid_to.isoformat() if row.valid_to else None,
+        "is_active": row.valid_to is None,
+        "supersedes_id": str(supersedes_id) if supersedes_id else None,
+    }
+
+
+async def get_source_provenance(
+    session: AsyncSession, target_id: uuid.UUID
+) -> dict[str, Any] | None:
+    """Where a claim or a passage comes from: article, publication, author, exact text, validity."""
+    sources = (Article, Publication)
+    joins = (
+        (Article, Article.id == Claim.article_id),
+        (Publication, Publication.id == Article.publication_id),
+    )
+    claim_stmt = (
+        select(Claim, *sources).join(*joins[0]).join(*joins[1]).where(Claim.id == target_id)
+    )
+    if row := (await session.execute(claim_stmt)).first():
+        claim, article, publication = row
+        return {
+            "kind": "claim",
+            "id": str(claim.id),
+            **_article_source(article, publication),
+            "verbatim_quote": claim.quote_span,
+            "claim_text": claim.text,
+            "claim_type": claim.claim_type,
+            "confidence": float(claim.confidence),
+            "topics": list(claim.entities),
+            "validity": _validity(claim, claim.supersedes_id),
+        }
+
+    passage_stmt = (
+        select(Passage, *sources)
+        .join(Article, Article.id == Passage.article_id)
+        .join(*joins[1])
+        .where(Passage.id == target_id)
+    )
+    if found := (await session.execute(passage_stmt)).first():
+        passage, article, publication = found
+        return {
+            "kind": "passage",
+            "id": str(passage.id),
+            "chunk_index": passage.chunk_index,
+            **_article_source(article, publication),
+            "verbatim_quote": passage.text,
+            "validity": _validity(passage),
+        }
+    return None

@@ -49,6 +49,12 @@ async def job_status(event_id: str) -> dict[str, Any]:
     return await operations.job_status(event_id)
 
 
+@app.get("/sources/{claim_or_passage_id}")
+async def source(claim_or_passage_id: str) -> dict[str, Any]:
+    """Where a cited claim or passage comes from: article, exact text, and whether it is current."""
+    return await operations.get_source(claim_or_passage_id)
+
+
 @app.get("/search")
 async def search(
     q: str = Query(min_length=1, max_length=2000),

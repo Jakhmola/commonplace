@@ -183,3 +183,32 @@ class Failure(Base):
     # The event that started the failed run.
     event_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = _now()
+
+
+class Claim(Base):
+    """Something an article asserts, backed by a verbatim quote from its text.
+
+    The id is deterministic per article version (see `schemas.ids.claim_id`).
+    Validity works as it does for passages: a claim is current while `valid_to`
+    is NULL, and a claim from an older version of the article is closed, never
+    deleted.
+    """
+
+    __tablename__ = "claims"
+    __table_args__ = (
+        Index("ix_claims_article_active", "article_id", postgresql_where=text("valid_to IS NULL")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    article_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("articles.id"), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    quote_span: Mapped[str] = mapped_column(Text, nullable=False)
+    claim_type: Mapped[str] = mapped_column(
+        String, nullable=False
+    )  # opinion|measurement|prediction
+    entities: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False, default=list)
+    confidence: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=1.0)
+    valid_from: Mapped[datetime] = _now()
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The claim from the previous version of the article that this one replaces.
+    supersedes_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("claims.id"), nullable=True)

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from commonplace import operations
 from commonplace.agents import core
 from commonplace.agents.core import run_agent
 from commonplace.agents.providers import estimate_cost_usd
@@ -247,3 +248,12 @@ def test_the_heuristic_extractor_quotes_real_sentences() -> None:
     for claim in batch.claims:
         assert find_verbatim(text, claim.quote_span) == claim.quote_span  # passes the guardrail
     assert batch.claims[0].entities == ["RAG"]
+
+
+# --- sources: an id from a citation leads back to the exact text ---
+
+
+async def test_a_source_id_must_be_a_uuid() -> None:
+    with pytest.raises(operations.OperationError) as raised:
+        await operations.get_source("not-a-uuid")
+    assert raised.value.status == 400
