@@ -1,0 +1,35 @@
+name: commonplace
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-commonplace}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-commonplace}
+      POSTGRES_DB: ${POSTGRES_DB:-commonplace}
+    ports: ["5433:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-commonplace} -d ${POSTGRES_DB:-commonplace}"]
+      interval: 3s
+      retries: 20
+
+  # Inspection only: browse tables. Pick "PostgreSQL" in the System dropdown.
+  adminer:
+    image: adminer:6.3.0
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    ports: ["8081:8080"]
+    depends_on: [postgres]
+
+  inngest:
+    image: inngest/inngest:v1.53.0
+    restart: unless-stopped
+    command: inngest dev -u http://host.docker.internal:${APP_PORT:-8000}/api/inngest
+    ports: ["8288:8288", "8289:8289"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+volumes:
+  pgdata:
