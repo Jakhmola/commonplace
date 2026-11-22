@@ -22,6 +22,7 @@ from commonplace.db.models import (
     Publication,
     Snapshot,
 )
+from commonplace.sources.quote_validator import fold
 
 # --- publications ---
 
@@ -615,11 +616,10 @@ async def find_matching_passage_for_quote(
     if not rows:
         return None
 
-    def squash(value: str) -> str:
-        return " ".join(value.split()).lower()
-
-    quote = squash(quote_span)
-    texts = [squash(row.text) for row in rows]
+    # Compared the way the quote guardrail compares: a quote that differs from
+    # the passage only in typography must still land on its passage.
+    quote = fold(quote_span).lower()
+    texts = [fold(row.text).lower() for row in rows]
     for needle in (quote, quote[:60]):
         for row, haystack in zip(rows, texts, strict=True):
             if needle in haystack:

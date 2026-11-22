@@ -5,10 +5,12 @@ The graph is derived data. Postgres holds the truth (the `claims` table); the
 graph is rebuilt from it by merging, so losing it costs a re-sync, not data.
 """
 
+import asyncio
 import logging
 from typing import Any
 
 from neo4j import AsyncDriver, AsyncGraphDatabase
+from neo4j.exceptions import Neo4jError
 
 from commonplace.config import settings
 from commonplace.graph import cypher
@@ -40,11 +42,18 @@ async def close_driver() -> None:
 
 
 async def execute_cypher(
-    statement: str, params: dict[str, Any] | None = None
+    statement: str, params: dict[str, Any] | None = None, *, timeout: float | None = None
 ) -> list[dict[str, Any]]:
-    async with get_driver().session() as session:
-        result = await session.run(statement, params or {})
-        return await result.data()
+    """Run one statement, giving up after `timeout` seconds.
+
+    The driver's own connection timeout only covers connecting. A server that
+    accepts the connection and then says nothing would otherwise hold every
+    search and health check for a minute.
+    """
+    async with asyncio.timeout(timeout or settings.memgraph_timeout_s):
+        async with get_driver().session() as session:
+            result = await session.run(statement, params or {})
+            return await result.data()
 
 
 async def ensure_graph_schema() -> None:
@@ -55,9 +64,11 @@ async def ensure_graph_schema() -> None:
     for statement in cypher.SCHEMA_STATEMENTS:
         try:
             await execute_cypher(statement)
-        except Exception as exc:  # noqa: BLE001
-            # Memgraph reports an existing index or constraint as an error.
-            logger.debug("Schema statement skipped (%s): %s", statement, exc)
+        except Neo4jError as exc:
+            # Memgraph reports an existing index or constraint as an error. Anything
+            # else (the server is down) propagates, so the schema is tried again later.
+            if "already exists" not in str(exc):
+                raise
     _schema_ready = True
 
 
@@ -73,6 +84,17 @@ async def count_graph_entities() -> tuple[int, int]:
     """(current claims, topics those claims are about)."""
     (row,) = await execute_cypher(cypher.COUNT_ACTIVE_CLAIMS_AND_TOPICS)
     return int(row["claims"]), int(row["topics"])
+
+
+async def close_article_claims(canonical_id: str, now_iso: str) -> int:
+    """Close every current claim of an article, e.g. when its text changed and
+    no new claims could be extracted. Returns how many were closed.
+    """
+    closed = await execute_cypher(
+        cypher.SUPERSEDE_ARTICLE_CLAIMS,
+        {"canonical_id": canonical_id, "active_claim_ids": [], "now": now_iso},
+    )
+    return int(closed[0]["superseded"]) if closed else 0
 
 
 async def sync_article_claims_to_graph(

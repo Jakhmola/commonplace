@@ -33,10 +33,10 @@ def test_concurrency_is_keyed_per_publication() -> None:
 
 
 def test_runs_for_the_same_article_never_overlap() -> None:
-    # Two events for one article (a poll and a manual add, or a feed posted twice)
-    # run one after the other, so the second finds the article stored and stops.
-    limits = {c.key: c.limit for c in _config().concurrency}
-    assert limits["event.data.canonical_id"] == 1
+    # Two events for one article (a poll and a manual add, or a feed posted twice):
+    # the second is skipped while the first is in flight, instead of embedding again.
+    singleton = _config().singleton
+    assert (singleton.key, singleton.mode) == ("event.data.canonical_id", "skip")
 
 
 def test_runs_are_throttled_globally() -> None:

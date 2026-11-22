@@ -36,7 +36,7 @@ from commonplace.db.queries import (
     persist_article_claims,
 )
 from commonplace.db.session import get_session
-from commonplace.graph.client import sync_article_claims_to_graph
+from commonplace.graph.client import close_article_claims, sync_article_claims_to_graph
 from commonplace.graph.ontology import normalize_author
 from commonplace.inngest_client import client
 from commonplace.schemas.entities import ClaimExtractionBatch
@@ -62,18 +62,57 @@ def should_extract(event_name: str, *, has_claims: bool) -> bool:
     return event_name == ARTICLE_UPDATED or not has_claims
 
 
+def should_retire_claims(failure: dict[str, Any]) -> bool:
+    """After an extraction failed for good: are the article's current claims now stale?
+
+    Yes when the run was for an edit. Its claims quote text that is gone, and
+    with no new extraction to replace them they would stay "current" forever.
+    A first extraction that fails leaves nothing behind to retire.
+    """
+    return (failure.get("event") or {}).get("name") == ARTICLE_UPDATED
+
+
+def extraction_step_id(*, has_key: bool) -> str:
+    """The model call and its no-key stand-in return different shapes, so they
+    are different steps: a run replayed after the key changed must not read
+    one's memo as the other's.
+    """
+    return "extract-claims-llm" if has_key else "extract-claims-heuristic"
+
+
+async def retire_stale_claims(ctx: inngest.Context) -> None:
+    """Runs when `extract-claims` has failed for good."""
+    failure: dict[str, Any] = dict(ctx.event.data or {})
+    if not should_retire_claims(failure):
+        return
+    original = ArticleIngested.model_validate(failure["event"]["data"])
+
+    async def retire() -> int:
+        now = datetime.now(UTC)
+        async with get_session() as session:
+            await persist_article_claims(
+                session, article_id=original.article_id, claims=[], now=now
+            )
+            await session.commit()
+        return await close_article_claims(original.canonical_id, now.isoformat())
+
+    await ctx.step.run("retire-stale-claims", retire)
+
+
 @client.create_function(
     fn_id="extract-claims",
     trigger=[
         inngest.TriggerEvent(event=ARTICLE_INGESTED),
         inngest.TriggerEvent(event=ARTICLE_UPDATED),
     ],
-    concurrency=[
-        # One extraction per article at a time: two quick edits must not interleave.
-        inngest.Concurrency(key="event.data.canonical_id", limit=1),
-        # And a cap across all articles, to stay inside the model provider's rate limit.
-        inngest.Concurrency(limit=settings.concurrency_extract_claims),
-    ],
+    # A cap across all articles, to stay inside the model provider's rate limit.
+    concurrency=[inngest.Concurrency(limit=settings.concurrency_extract_claims)],
+    # One extraction per article, and the newest event wins: if the article is
+    # edited while it is being extracted, that run is cancelled and a new one
+    # reads the new text. (Concurrency limits steps, not runs, so it cannot
+    # keep two runs for one article from interleaving.)
+    singleton=inngest.Singleton(key="event.data.canonical_id", mode="cancel"),
+    on_failure=retire_stale_claims,
     retries=3,
 )
 async def extract_claims(ctx: inngest.Context) -> dict[str, object]:
@@ -124,7 +163,7 @@ async def extract_claims(ctx: inngest.Context) -> dict[str, object]:
                 publication_name=publication["name"],
                 article_text=article["text"],
             ),
-            "extract-claims-llm",
+            extraction_step_id(has_key=True),
             payload.article_id,
         )
     else:
@@ -133,7 +172,7 @@ async def extract_claims(ctx: inngest.Context) -> dict[str, object]:
             return heuristic_extract_claims(article["text"]).model_dump(mode="json")
 
         batch = ClaimExtractionBatch.model_validate(
-            await ctx.step.run("extract-claims-llm", heuristic)
+            await ctx.step.run(extraction_step_id(has_key=False), heuristic)
         )
 
     async def validate_quote_spans() -> dict[str, Any]:

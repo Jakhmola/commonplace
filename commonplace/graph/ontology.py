@@ -41,6 +41,7 @@ TOPIC_ALIASES: dict[str, tuple[str, str]] = {
     "small-language-model": ("small-language-model", "Small Language Model"),
     "mcp": ("mcp", "Model Context Protocol (MCP)"),
     "model-context-protocol": ("mcp", "Model Context Protocol (MCP)"),
+    "model-context-protocol-mcp": ("mcp", "Model Context Protocol (MCP)"),
     "rl": ("reinforcement-learning", "Reinforcement Learning"),
     "reinforcement-learning": ("reinforcement-learning", "Reinforcement Learning"),
     "fine-tuning": ("fine-tuning", "Fine-Tuning"),
@@ -69,6 +70,9 @@ TOPIC_ALIASES: dict[str, tuple[str, str]] = {
     "open-weight-model": ("open-model", "Open Model"),
     "open-model": ("open-model", "Open Model"),
     "openai": ("openai", "OpenAI"),
+    # made only of words that are too generic alone, but a topic together
+    "tool-use": ("tool-use", "Tool Use"),
+    "saas": ("saas", "SaaS"),
 }
 
 # Too generic to connect anything: as topics these would become hubs that link
@@ -128,20 +132,7 @@ _ACRONYMS = frozenset(
 )
 
 # Words ending in "s" that are not plurals.
-_NOT_PLURAL = frozenset(
-    [
-        "analysis",
-        "bias",
-        "class",
-        "corpus",
-        "kubernetes",
-        "pass",
-        "postgres",
-        "redis",
-        "series",
-        "status",
-    ]
-)
+_NOT_PLURAL = frozenset({"kubernetes", "postgres", "series", "windows"})
 
 
 def slugify(raw: str) -> str:
@@ -150,16 +141,23 @@ def slugify(raw: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")
 
 
+# Endings that usually belong to a singular word or a name ("status", "analysis",
+# "physics", "synopsys", "mythos", "canvas"), and plurals the rules below get wrong.
+_SINGULAR_ENDINGS = ("ss", "us", "is", "ics", "sys", "os", "as")
+_IRREGULAR_PLURALS = {"caches": "cache"}
+_ARTICLES = frozenset({"the", "a", "an"})
+
+
 def _singular(word: str) -> str:
+    if word in _IRREGULAR_PLURALS:
+        return _IRREGULAR_PLURALS[word]
     if word[:-1] in _ACRONYMS and word.endswith("s"):
         return word[:-1]  # "gpus", "llms"
-    # Endings that usually belong to a singular word or a name: "status", "analysis",
-    # "physics", "synopsys".
-    if len(word) <= 3 or word in _NOT_PLURAL or word.endswith(("ss", "us", "is", "ics", "ys")):
+    if len(word) <= 3 or word in _NOT_PLURAL or word.endswith(_SINGULAR_ENDINGS):
         return word
     if word.endswith("ies"):
         return word[:-3] + "y"
-    if word.endswith(("sses", "xes", "ches", "shes")):
+    if word.endswith(("sses", "xes", "ches", "shes", "zes")):
         return word[:-2]
     return word[:-1] if word.endswith("s") else word
 
@@ -173,14 +171,20 @@ def normalize_author(raw: str | None) -> AuthorRef:
 def normalize_topic(raw: str) -> ExtractedTopic | None:
     """The canonical topic for a raw entity string, or None if it is too generic to keep."""
     words = slugify(unicodedata.normalize("NFKC", raw)).split("-")
-    words[-1] = _singular(words[-1])  # "coding agents" and "coding agent" are one topic
-    slug = "-".join(w for w in words if w)
-    if len(slug) < 2 or slug in STOP_TOPICS:
+    while words and words[0] in _ARTICLES:
+        words = words[1:]  # "the model context protocol"
+    words = [w for w in words if w]
+    if not words:
         return None
+    words[-1] = _singular(words[-1])  # "coding agents" and "coding agent" are one topic
+    slug = "-".join(words)
     if slug in TOPIC_ALIASES:
         canonical, name = TOPIC_ALIASES[slug]
         return ExtractedTopic(slug=canonical, name=name)
-    name = " ".join(w.upper() if w in _ACRONYMS else w.capitalize() for w in slug.split("-"))
+    generic = all(w in STOP_TOPICS for w in words)  # "model", but also "ai model"
+    if len(slug) < 2 or generic or slug.replace("-", "").isdigit():
+        return None
+    name = " ".join(w.upper() if w in _ACRONYMS else w.capitalize() for w in words)
     return ExtractedTopic(slug=slug, name=name)
 
 

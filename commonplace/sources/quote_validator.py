@@ -18,13 +18,14 @@ MIN_QUOTE_SPAN_CHARS = 15
 
 # Models retype curly quotes and long dashes as their keyboard forms. That is a
 # difference of typography, not of words, so both sides are folded before
-# comparing. Each replacement is one character for one, which keeps positions
-# in the folded text aligned with the original.
+# comparing.
 _TYPOGRAPHY = {
     0x2018: "'",  # left single quote
     0x2019: "'",  # right single quote, apostrophe
     0x201C: '"',  # left double quote
     0x201D: '"',  # right double quote
+    0x2010: "-",  # hyphen
+    0x2011: "-",  # non-breaking hyphen
     0x2013: "-",  # en dash
     0x2014: "-",  # em dash
     0x2212: "-",  # minus sign
@@ -32,9 +33,36 @@ _TYPOGRAPHY = {
 }
 
 
-def _collapse(text: str) -> str:
-    """Unicode-normalised, with every run of whitespace as one space."""
-    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text)).strip()
+def _fold(text: str) -> tuple[str, list[int]]:
+    """The form of `text` used for comparing, and where each of its characters came from.
+
+    Folding normalises Unicode (a superscript 2 becomes "2"), maps typographic
+    variants to their keyboard forms and collapses every run of whitespace to
+    one space. The second value gives, for each character of the folded text,
+    the index in `text` of the character it was made from, which is what lets
+    a match found in the folded text be cut out of the original.
+    """
+    folded: list[str] = []
+    origin: list[int] = []
+    space_at: int | None = None  # a run of whitespace waiting to become one space
+    for index, original in enumerate(text):
+        for char in unicodedata.normalize("NFKC", original).translate(_TYPOGRAPHY):
+            if char.isspace():
+                if folded and space_at is None:
+                    space_at = index
+                continue
+            if space_at is not None:
+                folded.append(" ")
+                origin.append(space_at)
+                space_at = None
+            folded.append(char)
+            origin.append(index)
+    return "".join(folded), origin
+
+
+def fold(text: str) -> str:
+    """`text` as it is compared: Unicode-normalised, typography folded, whitespace collapsed."""
+    return _fold(text)[0]
 
 
 def find_verbatim(
@@ -43,15 +71,19 @@ def find_verbatim(
     """The article's own text for `quote_span`, or None if the quote is not in the article.
 
     Line breaks and typographic variants are ignored when matching. The return
-    value is cut from the article, so what gets stored is the source's wording
-    and punctuation, not the model's retyping of it.
+    value is cut from the article as it was written, so what gets stored is
+    the source's characters (its superscripts, its curly quotes), not the
+    model's retyping of them. Only line breaks inside it are replaced by spaces.
     """
-    quote = _collapse(quote_span)
+    quote = fold(quote_span)
     if len(quote) < min_chars:
         return None
-    article = _collapse(article_text)
-    start = article.translate(_TYPOGRAPHY).find(quote.translate(_TYPOGRAPHY))
-    return article[start : start + len(quote)] if start >= 0 else None
+    folded, origin = _fold(article_text)
+    start = folded.find(quote)
+    if start < 0:
+        return None
+    first, last = origin[start], origin[start + len(quote) - 1]
+    return re.sub(r"\s+", " ", article_text[first : last + 1])
 
 
 def validate_and_normalize_claims(
@@ -77,7 +109,7 @@ def validate_and_normalize_claims(
         if quote is None or not topics:
             dropped += 1
             continue
-        text = _collapse(raw.claim_text)
+        text = " ".join(raw.claim_text.split())
         cid = str(claim_id(article_id, content_hash, quote, text))
         kept.setdefault(
             cid,

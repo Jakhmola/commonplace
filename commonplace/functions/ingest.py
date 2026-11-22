@@ -113,11 +113,12 @@ async def persist_article(
         inngest.Concurrency(
             key="event.data.publication_id", limit=settings.concurrency_per_publication
         ),
-        # One run per article at a time. A second event for the same article (a
-        # poll and a manual add, or a feed submitted twice) waits, then finds the
-        # article stored and stops instead of embedding it again.
-        inngest.Concurrency(key="event.data.canonical_id", limit=1),
     ],
+    # One run per article at a time. Concurrency limits steps, not runs, so it
+    # cannot do this: two runs for one article would interleave between steps
+    # and both embed. A second event for an article that is being ingested (a
+    # poll and a manual add, a feed submitted twice) is skipped.
+    singleton=inngest.Singleton(key="event.data.canonical_id", mode="skip"),
     # No key: the embedding quota is shared, so the limit is too. Throttle limits
     # run starts, and each run embeds its whole article in about one request.
     throttle=inngest.Throttle(limit=settings.ingest_runs_per_minute, period=timedelta(minutes=1)),

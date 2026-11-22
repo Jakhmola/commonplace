@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     memgraph_uri: str = "bolt://localhost:7687"
     memgraph_user: str = ""
     memgraph_password: str = ""
+    # A graph statement that has not answered by then is abandoned.
+    memgraph_timeout_s: float = 5.0
     graph_retrieval_limit: int = 15
 
     # --- Evaluation ---

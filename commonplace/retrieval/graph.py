@@ -75,7 +75,6 @@ _QUESTION_WORDS = frozenset(
         "those",
         "to",
         "under",
-        "use",
         "was",
         "were",
         "what",
@@ -90,25 +89,27 @@ _QUESTION_WORDS = frozenset(
         "would",
     ]
 )
-_NOT_A_TOPIC = STOP_TOPICS | _QUESTION_WORDS
 
 
 def extract_query_seed_topics(query: str) -> tuple[list[str], list[str]]:
     """(topic slugs, plain search terms) to start a graph traversal from.
 
-    Slugs come from every run of one to three content words, canonicalised the
-    same way topics are when they are stored, so "large language models" in a
-    question finds the `llm` topic. Search terms are the single content words,
-    matched against whole words of a topic's slug.
+    Slugs come from every run of one to three words of the question,
+    canonicalised the same way topics are when they are stored, so "large
+    language models" finds the `llm` topic. Only question words are removed
+    first: a word that is too generic to be a topic by itself ("code",
+    "model", "use") is still part of names that are not ("Claude Code", "open
+    model", "tool use"). Search terms are the single content words, matched
+    against whole words of a topic's slug.
     """
-    words = [w for w in re.findall(r"[a-z0-9]+", query.lower()) if w not in _NOT_A_TOPIC]
+    words = [w for w in re.findall(r"[a-z0-9]+", query.lower()) if w not in _QUESTION_WORDS]
     slugs: dict[str, None] = {}
     for size in (3, 2, 1):
         for start in range(len(words) - size + 1):
             topic = normalize_topic(" ".join(words[start : start + size]))
             if topic is not None:
                 slugs.setdefault(topic.slug)
-    terms = list(dict.fromkeys(w for w in words if len(w) >= 3))[:8]
+    terms = [w for w in dict.fromkeys(words) if len(w) >= 3 and w not in STOP_TOPICS][:8]
     return list(slugs), terms
 
 

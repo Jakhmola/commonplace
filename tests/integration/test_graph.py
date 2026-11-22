@@ -129,3 +129,24 @@ async def test_health_and_counts_report_the_graph(graph: None) -> None:
     before_claims, before_topics = await client.count_graph_entities()
     await _sync([_claim(1, "alpha"), _claim(2, "beta")])
     assert await client.count_graph_entities() == (before_claims + 2, before_topics + 2)
+
+
+async def test_an_exact_topic_match_outranks_matches_on_a_shared_word(graph: None) -> None:
+    # Many topics share a word ("gpt"); the one that was actually asked for comes first.
+    await _sync(
+        [_claim(1, "gpt-mini"), _claim(2, "gpt-5"), _claim(3, "gpt-4"), _claim(4, "gpt-nano")]
+    )
+    rows = await client.search_graph_by_topics(
+        topic_slugs=["graphtest-gpt-4"], search_terms=["graphtest"], limit=10
+    )
+    assert rows[0]["claim_id"] == "graphtest-3"
+    # the others still match through the shared word (as may real claims in the graph)
+    ours = [r["claim_id"] for r in rows if r["claim_id"].startswith("graphtest-")]
+    assert sorted(ours) == ["graphtest-1", "graphtest-2", "graphtest-3", "graphtest-4"]
+
+
+async def test_closing_an_articles_claims_in_the_graph(graph: None) -> None:
+    await _sync([_claim(1, "alpha"), _claim(2, "beta")])
+    closed = await client.close_article_claims(CANONICAL_ID, "2026-11-25T00:00:00+00:00")
+    assert closed == 2
+    assert await _search("alpha") == [] and await _search("beta") == []

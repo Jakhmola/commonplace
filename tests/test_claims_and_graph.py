@@ -3,8 +3,11 @@
 No Docker or keys needed. Tests that need Postgres or Memgraph live in tests/integration.
 """
 
+import asyncio
 import re
+import time
 import uuid
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,7 +16,7 @@ from pydantic import ValidationError
 from commonplace import operations
 from commonplace.agents import core
 from commonplace.agents.core import run_agent
-from commonplace.agents.providers import estimate_cost_usd
+from commonplace.agents.providers import call_llm, estimate_cost_usd
 from commonplace.agents.roles.extractor import (
     claim_extractor,
     format_extractor_prompt,
@@ -21,7 +24,14 @@ from commonplace.agents.roles.extractor import (
 )
 from commonplace.functions import FUNCTIONS
 from commonplace.functions.ask import cited, format_context
-from commonplace.functions.enrich import extract_claims, should_extract
+from commonplace.functions.enrich import (
+    extract_claims,
+    extraction_step_id,
+    should_extract,
+    should_retire_claims,
+)
+from commonplace.functions.ingest import ingest_article
+from commonplace.graph import client as graph_client
 from commonplace.graph import cypher
 from commonplace.graph.ontology import (
     EDGE_TYPES,
@@ -309,12 +319,9 @@ def test_extraction_reacts_to_new_and_updated_articles() -> None:
     assert extract_claims in FUNCTIONS
 
 
-def test_extraction_is_serialized_per_article_and_capped_globally() -> None:
-    limits = {c.key: c.limit for c in _extract_config().concurrency}
-    # two quick edits to one article must not interleave their writes
-    assert limits["event.data.canonical_id"] == 1
-    # and the model provider is called by at most this many runs at once
-    assert limits[None] == 2
+def test_extraction_is_capped_globally() -> None:
+    # the model provider is called by at most this many runs at once
+    assert {c.key: c.limit for c in _extract_config().concurrency} == {None: 2}
 
 
 def test_claims_extracted_summarises_the_guardrail() -> None:
@@ -453,3 +460,135 @@ def test_an_article_is_not_extracted_twice_unless_it_changed() -> None:
     assert should_extract("cp/article.ingested", has_claims=True) is False
     # an edit always re-extracts: its claims describe the old text
     assert should_extract("cp/article.updated", has_claims=True) is True
+
+
+# --- found in review of the claims and graph work ---
+
+
+def test_the_stored_quote_is_the_articles_own_characters() -> None:
+    # Matching normalises Unicode; what is stored must not be the normalised copy.
+    article = (
+        "Attention costs O(L²) per layer, which is why 10⁶ tokens is hard.\n"
+        "A “verifier‑based” check helps."
+    )
+    found = find_verbatim(article, "Attention costs O(L2) per layer, which is why 106 tokens")
+    assert found == "Attention costs O(L²) per layer, which is why 10⁶ tokens"
+    # a non-breaking hyphen in the article, a plain one from the model
+    assert (
+        find_verbatim(article, 'A "verifier-based" check helps.')
+        == "A “verifier‑based” check helps."
+    )
+    # a quote that spans the line break comes back on one line
+    spanning = find_verbatim(article, "tokens is hard. A “verifier‑based” check")
+    assert spanning == "tokens is hard. A “verifier‑based” check"
+
+
+def test_topic_names_that_only_look_plural_are_left_alone() -> None:
+    kept = {
+        "SaaS": "saas",
+        "Claude Mythos": "claude-mythos",
+        "Windows": "windows",
+        "Canvas": "canvas",
+    }
+    for raw, slug in kept.items():
+        assert normalize_topic(raw).slug == slug, raw  # type: ignore[union-attr]
+    merged = {"prompt caches": "prompt-cache", "API keys": "api-key", "batches": "batch"}
+    for raw, slug in merged.items():
+        assert normalize_topic(raw).slug == slug, raw  # type: ignore[union-attr]
+
+
+def test_generic_phrases_and_bare_numbers_are_not_topics() -> None:
+    for generic in ("AI model", "the model", "A.I.", "2025", "the system"):
+        assert normalize_topic(generic) is None, generic
+    assert normalize_topic("the Model Context Protocol (MCP)").slug == "mcp"  # type: ignore[union-attr]
+    assert normalize_topic("GPT-4").slug == "gpt-4"  # type: ignore[union-attr]
+
+
+def test_multi_word_topics_in_a_question_survive_as_seeds() -> None:
+    # "code", "model", "tool" and "use" are too generic as topics on their own,
+    # but they are part of names that are not.
+    assert "claude-code" in extract_query_seed_topics("What is Claude Code?")[0]
+    assert "open-model" in extract_query_seed_topics("Are open models catching up?")[0]
+    assert "tool-use" in extract_query_seed_topics("How reliable is tool use?")[0]
+    assert "gpt-4" in extract_query_seed_topics("Is GPT 4 still used?")[0]
+
+
+def test_one_extraction_per_article_and_the_newest_event_wins() -> None:
+    extract: Any = _extract_config().singleton
+    # Concurrency limits steps, not runs: two runs for one article could interleave.
+    assert (extract.key, extract.mode) == ("event.data.canonical_id", "cancel")
+    ingest: Any = ingest_article.get_config("http://localhost:8000").main.singleton
+    assert (ingest.key, ingest.mode) == ("event.data.canonical_id", "skip")
+
+
+def test_a_failed_extraction_has_a_handler_that_retires_stale_claims() -> None:
+    config = extract_claims.get_config("http://localhost:8000")
+    assert config.on_failure is not None
+    assert should_retire_claims({"event": {"name": "cp/article.updated"}}) is True
+    # a first extraction that fails leaves nothing stale behind
+    assert should_retire_claims({"event": {"name": "cp/article.ingested"}}) is False
+    assert should_retire_claims({}) is False
+
+
+def test_the_model_and_the_stand_in_are_different_steps() -> None:
+    # One step id with two output shapes would break a run replayed after the key changed.
+    assert extraction_step_id(has_key=True) != extraction_step_id(has_key=False)
+
+
+class _Parsed:
+    """A provider client whose structured call returns `parsed`."""
+
+    def __init__(self, parsed: Any, stop_reason: str = "end_turn", model: str = "m") -> None:
+        async def parse(**_: Any) -> Any:
+            usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=0)
+            return SimpleNamespace(
+                parsed_output=parsed, usage=usage, stop_reason=stop_reason, model=model
+            )
+
+        self.beta = SimpleNamespace(messages=SimpleNamespace(parse=parse))
+
+
+async def _call(llm: Any) -> dict[str, Any]:
+    return await call_llm(
+        system_prompt="s",
+        user_input="u",
+        model="claude-opus-5-5",
+        max_tokens=100,
+        output_schema=ClaimExtractionBatch,
+        llm=llm,
+    )
+
+
+async def test_no_parseable_output_raises_so_the_step_retries() -> None:
+    # Returning None would be memoized and fail the same way on every replay.
+    with pytest.raises(RuntimeError, match="refusal"):
+        await _call(_Parsed(None, stop_reason="refusal"))
+
+
+async def test_cost_is_priced_for_the_model_that_actually_answered() -> None:
+    served_by_fallback = _Parsed(ClaimExtractionBatch(), model="claude-haiku-5-5")
+    result = await _call(served_by_fallback)
+    assert result["usage"]["model"] == "claude-haiku-5-5"
+    assert result["usage"]["est_usd"] == pytest.approx(0.10)
+
+
+async def test_a_hung_graph_gives_up_quickly(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Hung:
+        def session(self) -> "Hung":
+            return self
+
+        async def __aenter__(self) -> "Hung":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+        async def run(self, *_: Any) -> None:
+            await asyncio.sleep(30)  # accepts the connection, never answers
+
+    monkeypatch.setattr(graph_client, "get_driver", lambda: Hung())
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError):
+        await graph_client.execute_cypher("RETURN 1", timeout=0.05)
+    assert time.perf_counter() - started < 1
+    assert (await graph_client.check_memgraph_health()).startswith("error")

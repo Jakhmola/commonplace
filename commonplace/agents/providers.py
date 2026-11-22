@@ -82,16 +82,25 @@ async def call_llm(
     else:
         response = await llm.beta.messages.parse(**request, output_format=output_schema)
         parsed = response.parsed_output
-        output = parsed.model_dump(mode="json") if parsed is not None else None
+        if parsed is None:
+            # Raised here, inside the step, so the step is retried with a fresh
+            # call. Returning None would be memoized, and every replay of the
+            # function would then fail on the same empty result.
+            raise RuntimeError(
+                f"The model returned no parseable output (stop reason: {response.stop_reason})"
+            )
+        output = parsed.model_dump(mode="json")
 
     input_tokens, output_tokens = response.usage.input_tokens, response.usage.output_tokens
+    # After a server-side fallback the answer came from another model, at its price.
+    served_by = getattr(response, "model", None) or model
     return {
         "output": output,
         "usage": {
-            "model": model,
+            "model": served_by,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "est_usd": estimate_cost_usd(model, input_tokens, output_tokens),
+            "est_usd": estimate_cost_usd(served_by, input_tokens, output_tokens),
             "article_id": str(article_id) if article_id else None,
         },
         "stop_reason": response.stop_reason,

@@ -78,8 +78,10 @@ SET r.at = pair.at
 """
 
 # Current claims about any of the given topics. A topic matches by its slug,
-# or when one of the plain search terms is a whole word of its slug. Claims
-# that match more of the topics come first.
+# or when one of the plain search terms is a whole word of its slug. A claim on
+# a topic that was asked for by name comes before one that only shares a word
+# with it ("gpt-4" before every other "gpt-..."); then claims that match more
+# topics come first.
 SEARCH_CLAIMS_BY_TOPICS = """
 MATCH (t:Topic)<-[:ABOUT]-(c:Claim)<-[:ASSERTS]-(art:Article)-[:PUBLISHED_IN]->(pub:Publication)
 WHERE c.valid_to IS NULL
@@ -100,8 +102,9 @@ RETURN c.claim_id AS claim_id,
        au.name AS author,
        pub.slug AS publication_slug,
        collect(DISTINCT t.slug) AS matched_topic_slugs,
-       count(DISTINCT t) AS matched_topics
-ORDER BY matched_topics DESC, confidence DESC, published_at DESC, claim_id ASC
+       count(DISTINCT t) AS matched_topics,
+       sum(CASE WHEN t.slug IN $topic_slugs THEN 1 ELSE 0 END) AS exact_topics
+ORDER BY exact_topics DESC, matched_topics DESC, confidence DESC, published_at DESC, claim_id ASC
 LIMIT $limit
 """
 

@@ -23,6 +23,7 @@ from sqlalchemy.pool import NullPool
 import commonplace.db.session as db_session
 from commonplace.config import settings
 from commonplace.db.queries import upsert_article, upsert_publication
+from commonplace.graph import client as graph_client
 
 
 def _reachable(url: str) -> bool:
@@ -43,6 +44,15 @@ MEMGRAPH_UP = _reachable(settings.memgraph_uri)
 def _needs_postgres() -> None:
     if not POSTGRES_UP:
         pytest.skip("Postgres is not running (make up)")
+
+
+@pytest.fixture(autouse=True)
+async def _fresh_graph_driver() -> AsyncIterator[None]:
+    """The graph driver belongs to the event loop that created it, and each test
+    has its own loop: close it after every test that may have used it.
+    """
+    yield
+    await graph_client.close_driver()
 
 
 @pytest.fixture

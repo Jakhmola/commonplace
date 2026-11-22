@@ -37,7 +37,10 @@ async def check_health() -> dict[str, Any]:
     checks["memgraph"] = await check_memgraph_health()
     topics = 0
     if checks["memgraph"] == "ok":
-        _, topics = await count_graph_entities()
+        try:
+            _, topics = await count_graph_entities()
+        except Exception as exc:  # noqa: BLE001
+            checks["memgraph"] = f"error: {exc.__class__.__name__}"
 
     return {
         "status": "ok" if all(v == "ok" for v in checks.values()) else "degraded",
