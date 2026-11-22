@@ -32,10 +32,12 @@ class Settings(BaseSettings):
     # Runs that may start per minute across all publications. One run makes about
     # one embedding request, so this is roughly "embedding requests per minute".
     ingest_runs_per_minute: int = 50
-    # Inngest priority is a time shift in seconds (-600..600), not a rank: a manual
-    # run is queued as if it had arrived 600 s earlier, a backfill run 600 s later.
+    # Inngest priority is a time shift in seconds (-600..600), not a rank. A manual
+    # run is queued as if it had arrived 600 s earlier, so it overtakes whatever was
+    # queued in the last ten minutes. Everything else stays at 0: a negative value
+    # holds the run for that long even when the queue is empty.
     priority_manual_s: int = 600
-    priority_backfill_s: int = -600
+    priority_backfill_s: int = 0
 
     # --- Retrieval and answers ---
     rrf_k: int = 60

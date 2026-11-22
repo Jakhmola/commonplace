@@ -38,10 +38,12 @@ def test_runs_are_throttled_globally() -> None:
     assert throttle.limit == 50
 
 
-def test_manual_runs_are_shifted_ahead_and_backfill_runs_behind() -> None:
+def test_manual_runs_are_shifted_ahead_and_other_runs_are_not_delayed() -> None:
     priority = _config().priority
     assert priority is not None
-    assert priority.run == "event.data.via == 'manual' ? 600 : -600"
+    # A negative value is not a lower rank: Inngest holds the run that many seconds
+    # even on an idle queue, so a backfill would start ten minutes late.
+    assert priority.run == "event.data.via == 'manual' ? 600 : 0"
 
 
 def test_no_idempotency_key_so_an_article_can_be_resent() -> None:

@@ -49,7 +49,7 @@ from commonplace.sources.parser import ParsedArticle, parse_html
     # No key: the embedding quota is shared, so the limit is too. Throttle limits
     # run starts, and each run embeds its whole article in about one request.
     throttle=inngest.Throttle(limit=settings.ingest_runs_per_minute, period=timedelta(minutes=1)),
-    # Manual articles are queued as if they had arrived earlier, backfill later.
+    # Manual articles are queued as if they had arrived earlier than they did.
     priority=inngest.Priority(
         run=(
             f"event.data.via == 'manual' ? {settings.priority_manual_s} "
