@@ -195,7 +195,7 @@ def test_verdicts_are_binary() -> None:
     assert ok.failure_code == "NONE"
     for not_binary in ("MAYBE", "4/5", "pass"):
         with pytest.raises(ValidationError):
-            BinaryVerdict(critique="Some reasoning here.", verdict=not_binary)  # type: ignore[arg-type]
+            BinaryVerdict(critique="Some reasoning here.", verdict=not_binary)
 
 
 def test_judge_input_numbers_passages_and_shows_claim_types() -> None:
