@@ -8,6 +8,8 @@ import pytest
 import respx
 
 from commonplace.functions.freshness import poll_feeds, publications_to_poll
+from commonplace.functions.ingest import classify_change
+from commonplace.schemas.events import ARTICLE_UPDATED, ArticleUpdated
 from commonplace.sources.allowlist import PublicationEntry
 from commonplace.sources.rss import fetch_feed_conditional
 
@@ -90,3 +92,23 @@ def test_poll_can_be_limited_to_one_publication() -> None:
     ]
     with pytest.raises(inngest.NonRetriableError, match="not in publications.yaml"):
         publications_to_poll(PUBLICATIONS, "no-such-feed")
+
+
+# --- edits: decided from the content hash, announced as an update ---
+
+
+def test_change_is_decided_from_the_content_hash() -> None:
+    assert classify_change(None, "abc") == "new"
+    assert classify_change("abc", "abc") == "unchanged"  # stops before the paid call
+    assert classify_change("abc", "def") == "changed"
+
+
+def test_article_updated_carries_the_new_hash_and_count() -> None:
+    updated = ArticleUpdated(
+        canonical_id="pub:latent-space:a-post",
+        article_id="6f1c0a3e-9d5b-4c55-8f0e-2b7a4d1c9e10",
+        content_hash="def",
+        passage_count=7,
+    )
+    assert ARTICLE_UPDATED == "cp/article.updated"
+    assert updated.model_dump(mode="json")["passage_count"] == 7

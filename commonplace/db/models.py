@@ -8,7 +8,18 @@ from datetime import datetime
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Computed, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, func
+from sqlalchemy import (
+    Computed,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -58,7 +69,14 @@ class Article(Base):
 class Passage(Base):
     __tablename__ = "passages"
     __table_args__ = (
-        Index("uq_passages_article_chunk", "article_id", "chunk_index", unique=True),
+        # Unique among current passages only: superseded versions keep their chunk index.
+        Index(
+            "uq_passages_article_chunk",
+            "article_id",
+            "chunk_index",
+            unique=True,
+            postgresql_where=text("valid_to IS NULL"),
+        ),
         Index("ix_passages_tsv", "tsv", postgresql_using="gin"),
     )
 
@@ -146,4 +164,22 @@ class Snapshot(Base):
     # Written by the answer evaluators; NULL until an answer has been graded.
     confidence: Mapped[float | None] = mapped_column(Numeric(5, 4), nullable=True)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = _now()
+
+
+class Failure(Base):
+    """A run that failed for good, as reported by Inngest's own failure event.
+
+    Real failures are worth keeping: they say which articles never made it in,
+    and they are the raw material for judging the system later.
+    """
+
+    __tablename__ = "failures"
+
+    id: Mapped[uuid.UUID] = _pk()
+    function_id: Mapped[str] = mapped_column(String, nullable=False)
+    run_id: Mapped[str] = mapped_column(String, nullable=False)
+    error: Mapped[str] = mapped_column(Text, nullable=False)
+    # The event that started the failed run.
+    event_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = _now()

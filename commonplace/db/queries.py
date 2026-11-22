@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Row, Select, delete, func, select
+from sqlalchemy import Row, Select, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -121,37 +121,50 @@ async def upsert_article(
     return (await session.execute(stmt)).scalar_one()
 
 
-async def replace_passages(
+async def get_article_by_canonical_id(session: AsyncSession, canonical_id: str) -> Article | None:
+    return (
+        await session.execute(select(Article).where(Article.canonical_id == canonical_id))
+    ).scalar_one_or_none()
+
+
+async def count_current_passages(session: AsyncSession, article_id: uuid.UUID) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(Passage)
+        .where(Passage.article_id == article_id, Passage.valid_to.is_(None))
+    )
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def store_passages(
     session: AsyncSession, *, article_id: uuid.UUID, passages: list[dict[str, Any]]
 ) -> int:
-    """Upsert by `(article_id, chunk_index)` and drop any tail left from a longer version.
+    """Make `passages` the article's current version.
 
-    Saving the same article twice changes nothing.
+    Whatever was current is closed with `valid_to = now()`, never deleted or
+    overwritten, so the history of an edited article stays queryable. For a
+    new article there is nothing to close.
     """
     await session.execute(
-        delete(Passage).where(
-            Passage.article_id == article_id, Passage.chunk_index >= len(passages)
+        update(Passage)
+        .where(Passage.article_id == article_id, Passage.valid_to.is_(None))
+        .values(valid_to=func.now())
+    )
+    if passages:
+        await session.execute(
+            insert(Passage).values(
+                [
+                    {
+                        "id": uuid.uuid4(),
+                        "article_id": article_id,
+                        "chunk_index": p["chunk_index"],
+                        "text": p["text"],
+                        "embedding": p["embedding"],
+                    }
+                    for p in passages
+                ]
+            )
         )
-    )
-    if not passages:
-        return 0
-    stmt = insert(Passage).values(
-        [
-            {
-                "id": uuid.uuid4(),
-                "article_id": article_id,
-                "chunk_index": p["chunk_index"],
-                "text": p["text"],
-                "embedding": p["embedding"],
-            }
-            for p in passages
-        ]
-    )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[Passage.article_id, Passage.chunk_index],
-        set_={"text": stmt.excluded.text, "embedding": stmt.excluded.embedding},
-    )
-    await session.execute(stmt)
     return len(passages)
 
 

@@ -15,6 +15,7 @@ PUBLICATION_ADDED = "cp/publication.added"
 FEED_POLL = "cp/feed.poll"
 ARTICLE_DISCOVERED = "cp/article.discovered"
 ARTICLE_INGESTED = "cp/article.ingested"
+ARTICLE_UPDATED = "cp/article.updated"
 ANSWER_PRODUCED = "cp/answer.produced"
 
 DiscoverySource = Literal["rss", "backfill", "manual", "poll"]
@@ -47,6 +48,15 @@ class ArticleDiscovered(BaseModel):
 
 class ArticleIngested(BaseModel):
     """Ingest -> whoever listens. The article's passages are stored and searchable."""
+
+    canonical_id: str
+    article_id: UUID
+    content_hash: str
+    passage_count: int
+
+
+class ArticleUpdated(BaseModel):
+    """Ingest -> whoever listens. An article changed: its old passages were superseded."""
 
     canonical_id: str
     article_id: UUID
