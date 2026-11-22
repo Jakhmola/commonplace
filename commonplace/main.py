@@ -6,12 +6,13 @@ from typing import Any, Literal
 import httpx
 import inngest.fast_api
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from commonplace.config import settings
 from commonplace.db.queries import get_job_status, upsert_publication
 from commonplace.db.session import get_session
 from commonplace.functions import FUNCTIONS
+from commonplace.functions.ask import ask_question
 from commonplace.health import check_health
 from commonplace.inngest_client import client
 from commonplace.retrieval import dense, hybrid, sparse
@@ -167,3 +168,15 @@ async def search(
     async with get_session() as session:
         results = await retriever.search(session, q, limit)
     return {"mode": mode, "results": results}
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1)
+    limit: int | None = Field(default=None, ge=1, le=25)
+
+
+@app.post("/ask")
+async def ask(payload: AskRequest) -> dict[str, Any]:
+    """Answer a question with inline citations. A read: it never creates an Inngest run."""
+    async with get_session() as session:
+        return await ask_question(session, payload.question, payload.limit)

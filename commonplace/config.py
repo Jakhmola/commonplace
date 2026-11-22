@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,8 +40,10 @@ class Settings(BaseSettings):
     # --- Retrieval and answers ---
     rrf_k: int = 60
     retrieval_limit: int = 5
-    synthesis_model: str = "claude-sonnet-5-5"
-    synthesis_max_tokens: int = 1024
+    synthesis_model: str = "claude-opus-5-5"
+    # Thinking tokens count against this too, so it is a ceiling, not a target length.
+    synthesis_max_tokens: int = 8000
+    synthesis_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
 
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536

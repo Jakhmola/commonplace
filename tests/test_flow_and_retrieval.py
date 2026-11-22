@@ -1,10 +1,14 @@
 """Unit tests for flow control, hybrid retrieval and answers. No Docker or keys needed."""
 
+from types import SimpleNamespace
 from typing import Any
 
+import anthropic
+import httpx2
 import pytest
 
 from commonplace.functions import FUNCTIONS
+from commonplace.functions.ask import cited, format_context, synthesize
 from commonplace.functions.ingest import ingest_article
 from commonplace.main import resolve_manual_article
 from commonplace.retrieval.hybrid import compute_rrf
@@ -136,3 +140,44 @@ def test_manual_article_url_is_validated() -> None:
         resolve_manual_article("https://example.com/p/a-post", [AHEAD_OF_AI])
     with pytest.raises(ValueError, match="no path segment"):
         resolve_manual_article("https://magazine.sebastianraschka.com/", [AHEAD_OF_AI])
+
+
+# --- answers: numbered context in, citations for what was actually cited out ---
+
+PASSAGES = [
+    {**_hit("p1"), "title": "First post", "text": "Durable steps are memoized."},
+    {**_hit("p2"), "title": "Second post", "author": None, "text": "Throttling limits run starts."},
+    {**_hit("p3"), "title": "Third post", "text": "Priority is a time shift."},
+]
+
+
+def test_context_numbers_passages_from_one() -> None:
+    context = format_context(PASSAGES)
+    assert context.startswith("[1] (Title: First post | Author: Jane Writer | URL: https://")
+    assert "[2] (Title: Second post | Author: Unknown |" in context
+    assert context.count("\n\n") == 2  # one blank line between passages, none inside
+    assert context.endswith("Priority is a time shift.")
+
+
+def test_only_passages_the_answer_cites_become_citations() -> None:
+    answer = "Steps are memoized [1]. Priority shifts arrival time [3]. See also [7]."
+    citations = cited(answer, PASSAGES)
+    assert [(c["citation_idx"], c["passage_id"]) for c in citations] == [(1, "p1"), (3, "p3")]
+    assert citations[0].keys() == {"citation_idx", "passage_id", "title", "author", "url"}
+    assert cited("I could not find this in the passages.", PASSAGES) == []
+
+
+class _FailingLLM:
+    """Stands in for the Anthropic client when the provider is unreachable."""
+
+    def __init__(self) -> None:
+        async def create(**_: Any) -> Any:
+            raise anthropic.APIConnectionError(request=httpx2.Request("POST", "https://x"))
+
+        self.beta = SimpleNamespace(messages=SimpleNamespace(create=create))
+
+
+async def test_llm_failure_becomes_the_answer_text() -> None:
+    answer = await synthesize(_FailingLLM(), "What is throttling?", PASSAGES)  # type: ignore[arg-type]
+    assert answer.startswith("LLM synthesis failed (APIConnectionError)")
+    assert cited(answer, PASSAGES) == []  # a failed answer cites nothing
