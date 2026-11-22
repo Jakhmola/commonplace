@@ -170,6 +170,7 @@ READ_TOOLS = {
     "cp_sources",
     "cp_eval_report",
     "cp_research_result",
+    "cp_weekly_digest",
 }
 TRIGGER_TOOLS = {"cp_add_publication", "cp_backfill", "cp_sync", "cp_research"}
 

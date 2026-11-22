@@ -5,6 +5,7 @@ from typing import Any
 import inngest
 
 from commonplace.functions.backfill import backfill_publication
+from commonplace.functions.digest import generate_weekly_digest
 from commonplace.functions.enrich import extract_claims
 from commonplace.functions.evals import evaluate_answer, run_eval_suite
 from commonplace.functions.freshness import poll_feeds
@@ -21,4 +22,5 @@ FUNCTIONS: list[inngest.Function[Any]] = [
     evaluate_answer,
     run_eval_suite,
     run_research_agent,
+    generate_weekly_digest,
 ]

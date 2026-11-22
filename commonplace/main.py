@@ -111,3 +111,22 @@ async def research_result(research_id: str) -> dict[str, Any]:
     citations, each round of searching, why it stopped, its cost and its scores.
     """
     return await operations.get_research(research_id)
+
+
+class DigestRequest(BaseModel):
+    # How many complete days before today the digest covers (default 7).
+    lookback_days: int | None = Field(default=None, ge=1, le=90)
+
+
+@app.post("/digests/run")
+async def run_digest(payload: DigestRequest | None = None) -> dict[str, Any]:
+    """Write the digest now instead of waiting for Monday 08:00 UTC. Poll
+    GET /jobs/{event_id}, then read GET /digests/latest.
+    """
+    return await operations.queue_digest(payload.lookback_days if payload else None)
+
+
+@app.get("/digests/latest")
+async def latest_digest() -> dict[str, Any]:
+    """The most recent digest: a cited briefing of what the window's articles claim."""
+    return await operations.latest_digest()

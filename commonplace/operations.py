@@ -18,6 +18,7 @@ import openai
 from commonplace.config import settings
 from commonplace.db.queries import (
     get_job_status,
+    get_latest_digest,
     get_latest_eval_report,
     get_research_run,
     get_source_provenance,
@@ -31,11 +32,13 @@ from commonplace.inngest_client import client
 from commonplace.retrieval import dense, hybrid, sparse
 from commonplace.schemas.events import (
     ARTICLE_DISCOVERED,
+    DIGEST_REQUESTED,
     EVAL_RUN_REQUESTED,
     FEED_POLL,
     PUBLICATION_ADDED,
     RESEARCH_REQUESTED,
     ArticleDiscovered,
+    DigestRequested,
     EvalRunRequested,
     FeedPoll,
     PublicationAdded,
@@ -310,3 +313,26 @@ async def get_research(research_id: str) -> dict[str, Any]:
     if run is None:
         raise OperationError(404, f"No research run has the id {research_id!r}")
     return run
+
+
+# --- weekly digest ---
+
+
+async def queue_digest(lookback_days: int | None = None) -> dict[str, Any]:
+    """Write the digest now instead of waiting for Monday. Read it with `latest_digest`."""
+    requested = DigestRequested(lookback_days=lookback_days or settings.digest_lookback_days)
+    (event_id,) = await _send(event(DIGEST_REQUESTED, requested))
+    return _handle(event_id, lookback_days=requested.lookback_days)
+
+
+async def _load_latest_digest() -> dict[str, Any] | None:
+    async with get_session() as session:
+        return await get_latest_digest(session)
+
+
+async def latest_digest() -> dict[str, Any]:
+    """The digest for the most recent window: the briefing, its cited claims and counts."""
+    digest = await _load_latest_digest()
+    if digest is None:
+        raise OperationError(404, "No digest has been written yet. Request one first.")
+    return digest

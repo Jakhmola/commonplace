@@ -3,6 +3,7 @@
 No Docker or keys needed.
 """
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import inngest
@@ -26,9 +27,20 @@ from commonplace.agents.roles.researcher import (
 )
 from commonplace.citations import format_context
 from commonplace.functions import FUNCTIONS, research
+from commonplace.functions.digest import (
+    citations_in_bounds,
+    digest_evidence,
+    digest_id_for,
+    digest_window,
+    format_digest_input,
+    generate_weekly_digest,
+    plain_digest,
+    shared_topics,
+)
 from commonplace.functions.research import run_research_agent
-from commonplace.main import ResearchRequest
+from commonplace.main import DigestRequest, ResearchRequest
 from commonplace.mcp import tools
+from commonplace.mcp.server import mcp
 from commonplace.schemas.events import (
     DIGEST_PUBLISHED,
     DIGEST_REQUESTED,
@@ -371,3 +383,142 @@ async def test_an_unknown_research_id_is_a_tool_error(monkeypatch: pytest.Monkey
     monkeypatch.setattr(operations, "_load_research", nothing)
     with pytest.raises(ToolError, match="No research run"):
         await tools.cp_research_result("res_does_not_exist")
+
+
+# --- the weekly digest ---
+
+
+def test_the_digest_window_is_whole_days_and_stable_within_a_day() -> None:
+    monday_morning = datetime(2026, 11, 23, 8, 0, tzinfo=UTC)
+    start, end = digest_window(monday_morning, 7)
+    # the seven complete days before today: last Monday up to, not including, this one
+    assert (start, end) == (
+        datetime(2026, 11, 16, tzinfo=UTC),
+        datetime(2026, 11, 23, tzinfo=UTC),
+    )
+    assert digest_window(datetime(2026, 11, 23, 23, 59, tzinfo=UTC), 7) == (start, end)
+    assert digest_window(monday_morning, 1) == (datetime(2026, 11, 22, tzinfo=UTC), end)
+
+
+def test_the_same_window_always_gets_the_same_digest_id() -> None:
+    start, end = digest_window(datetime(2026, 11, 23, 8, 0, tzinfo=UTC), 7)
+    assert digest_id_for(start, end) == digest_id_for(start, end)
+    assert digest_id_for(start, end) != digest_id_for(start - timedelta(days=7), start)
+    assert digest_id_for(start, end) != digest_id_for(end - timedelta(days=1), end)
+
+
+def _claims() -> list[dict[str, Any]]:
+    def claim(n: int, kind: str, publication: str, topics: list[str]) -> dict[str, Any]:
+        return {
+            "claim_id": f"c{n}",
+            "claim_text": f"claim {n}",
+            "claim_type": kind,
+            "topics": topics,
+            "article_id": f"a{n}",
+            "title": f"Post {n}",
+            "author": f"Author {n}",
+            "url": f"https://example.com/p/{n}",
+            "publication": publication,
+        }
+
+    return [
+        claim(1, "measurement", "Alpha", ["rag", "evals"]),
+        claim(2, "opinion", "Beta", ["rag"]),
+        claim(3, "prediction", "Alpha", ["evals", "agents"]),
+        claim(4, "opinion", "Gamma", ["rag"]),
+    ]
+
+
+def test_digest_evidence_is_numbered_from_one() -> None:
+    evidence = digest_evidence(_claims())
+    assert [e["n"] for e in evidence] == [1, 2, 3, 4]
+    assert evidence[0] == {
+        "n": 1,
+        "claim_id": "c1",
+        "claim_text": "claim 1",
+        "claim_type": "measurement",
+        "title": "Post 1",
+        "author": "Author 1",
+        "publication": "Alpha",
+        "url": "https://example.com/p/1",
+        "topics": ["rag", "evals"],
+    }
+
+
+def test_shared_topics_are_those_several_publications_wrote_about() -> None:
+    shared = shared_topics(digest_evidence(_claims()))
+    # "evals" came up twice but only in Alpha; "agents" once
+    assert shared == [
+        {"topic": "rag", "publications": ["Alpha", "Beta", "Gamma"], "claims": [1, 2, 4]}
+    ]
+
+
+def test_a_digest_citing_past_its_evidence_is_caught() -> None:
+    evidence = digest_evidence(_claims())
+    assert citations_in_bounds("Two things happened [1][4].", evidence)
+    assert not citations_in_bounds("Something else [5].", evidence)
+    assert not citations_in_bounds("Nothing is cited here.", evidence)  # a digest must cite
+    assert citations_in_bounds("Nothing to report.", [])
+
+
+def test_without_a_model_the_digest_lists_the_claims_by_type() -> None:
+    evidence = digest_evidence(_claims())
+    listing = plain_digest(evidence)
+    assert citations_in_bounds(listing, evidence)
+    measured, argued, predicted = (
+        listing.index("## What was measured"),
+        listing.index("## What authors argued"),
+        listing.index("## Predictions to watch"),
+    )
+    assert measured < listing.index("claim 1") < argued < listing.index("claim 2") < predicted
+    assert "claim 4 (Author 4, Post 4) [4]" in listing
+    assert plain_digest([]) == "No claims were extracted from the articles in this window."
+
+
+def test_the_writer_is_shown_numbered_claims_and_the_shared_topics() -> None:
+    evidence = digest_evidence(_claims())
+    shown = format_digest_input("Week of 2026-11-16", evidence, shared_topics(evidence))
+    assert '[2] (opinion) claim 2 - Author 2, Beta, "Post 2"' in shown
+    assert "rag: Alpha, Beta, Gamma (claims 1, 2, 4)" in shown
+
+
+def test_the_digest_runs_on_mondays_and_on_request() -> None:
+    config = generate_weekly_digest.get_config("http://localhost:8000").main
+    triggers = {getattr(t, "cron", None) or getattr(t, "event", None) for t in config.triggers}
+    assert triggers == {"0 8 * * 1", "cp/digest.requested"}
+    assert generate_weekly_digest in FUNCTIONS and len(FUNCTIONS) == 9
+
+
+def test_digest_requests_are_bounded() -> None:
+    assert DigestRequest().lookback_days is None
+    for bad in (0, 91):
+        with pytest.raises(ValidationError):
+            DigestRequest(lookback_days=bad)
+
+
+async def test_requesting_a_digest_returns_a_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[inngest.Event] = []
+
+    async def send(event: inngest.Event) -> list[str]:
+        sent.append(event)
+        return ["evt-digest"]
+
+    monkeypatch.setattr(operations.client, "send", send)
+    handle = await operations.queue_digest(14)
+    assert (sent[0].name, sent[0].data) == ("cp/digest.requested", {"lookback_days": 14})
+    assert (handle["event_id"], handle["status"]) == ("evt-digest", "queued")
+
+
+async def test_no_digest_yet_is_a_tool_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def nothing() -> None:
+        return None
+
+    monkeypatch.setattr(operations, "_load_latest_digest", nothing)
+    with pytest.raises(ToolError, match="No digest"):
+        await tools.cp_weekly_digest()
+
+
+async def test_the_server_registers_thirteen_tools() -> None:
+    names = {tool.name for tool in await mcp.list_tools()}
+    assert len(names) == 13
+    assert {"cp_research", "cp_research_result", "cp_weekly_digest"} <= names

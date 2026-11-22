@@ -15,7 +15,7 @@ async def test_tools_are_listed_over_stdio() -> None:
     async with stdio_client(SERVER) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         listed = await session.list_tools()
-    assert len(listed.tools) == 12
+    assert len(listed.tools) == 13
     assert {"cp_search", "cp_ask", "cp_sync", "cp_research"} <= {tool.name for tool in listed.tools}
 
 

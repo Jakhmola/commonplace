@@ -1,8 +1,8 @@
 """The MCP tools. Each is a thin call into `operations.py`.
 
 Reads (`cp_health`, `cp_search`, `cp_ask`, `cp_sources`, `cp_eval_report`,
-`cp_research_result`, `cp_job_status`, `cp_list_publications`) answer directly
-from Postgres and the graph. Tools that start work (`cp_research`,
+`cp_research_result`, `cp_weekly_digest`, `cp_job_status`, `cp_list_publications`)
+answer directly from Postgres and the graph. Tools that start work (`cp_research`,
 `cp_add_publication`, `cp_backfill`, `cp_sync`) send an event and return a
 handle at once: an agent should never sit waiting
 on a long tool call, so it gets something to poll instead.
@@ -147,6 +147,21 @@ async def cp_research_result(
     in dollars and a `confidence` from the automatic checks and judges.
     """
     return await operations.get_research(research_id)
+
+
+@_tool
+async def cp_weekly_digest() -> dict[str, Any]:
+    """Read the latest weekly digest of the knowledge base.
+
+    A short briefing of what the articles published in the last complete week
+    claimed: what was measured, what authors argued, topics that several
+    publications wrote about, and predictions. Every statement cites a claim by
+    number; `citations` lists those claims with author, article and URL, and a
+    `claim_id` that cp_sources can trace to the exact quote. `stats` has article
+    and claim counts and whether the citations checked out. A new digest is
+    written every Monday at 08:00 UTC.
+    """
+    return await operations.latest_digest()
 
 
 @_tool
