@@ -36,6 +36,7 @@ def _reachable(url: str) -> bool:
 
 POSTGRES_UP = _reachable(settings.database_url)
 INNGEST_UP = _reachable(settings.inngest_base_url)
+MEMGRAPH_UP = _reachable(settings.memgraph_uri)
 
 
 @pytest.fixture(autouse=True)

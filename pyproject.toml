@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.28.1",
     "inngest>=0.5.20",
     "mcp>=2.3.0",
+    "neo4j>=6.4.1",
     "openai>=3.57.0",
     "pgvector>=0.5.1",
     "pydantic>=2.14.4",

@@ -23,9 +23,10 @@ logs:
 reset:
 	$(COMPOSE) down -v
 
-# Destructive: empties every app table, keeps the schema.
+# Destructive: empties every app table (keeps the schema) and the whole graph.
 db-clear:
 	$(COMPOSE) exec -T postgres psql -U $${POSTGRES_USER:-commonplace} -d $${POSTGRES_DB:-commonplace} -f - < infra/db_clear.sql
+	$(COMPOSE) exec -T memgraph mgconsole < infra/graph_clear.cypher
 
 lint:
 	uv run ruff check .

@@ -3,6 +3,7 @@
 No Docker or keys needed. Tests that need Postgres or Memgraph live in tests/integration.
 """
 
+import re
 import uuid
 from typing import Any
 
@@ -18,6 +19,7 @@ from commonplace.agents.roles.extractor import (
     format_extractor_prompt,
     heuristic_extract_claims,
 )
+from commonplace.graph import cypher
 from commonplace.graph.ontology import (
     EDGE_TYPES,
     NODE_LABELS,
@@ -257,3 +259,31 @@ async def test_a_source_id_must_be_a_uuid() -> None:
     with pytest.raises(operations.OperationError) as raised:
         await operations.get_source("not-a-uuid")
     assert raised.value.status == 400
+
+
+# --- cypher: the three rules every statement must keep ---
+
+
+def _statements() -> dict[str, str]:
+    return {
+        name: value
+        for name, value in vars(cypher).items()
+        if name.isupper() and isinstance(value, str)
+    }
+
+
+def test_cypher_is_parameterized_merges_only_and_reads_filter_validity() -> None:
+    statements = _statements()
+    assert len(statements) >= 6
+    for name, statement in statements.items():
+        # 1. values arrive as $parameters, never by string formatting
+        assert "{}" not in statement and "%s" not in statement, name
+        assert not re.search(r"\{[a-z_]+\}", statement), name
+        # 2. writes MERGE on a key, so a replay cannot create a second node
+        # (`ON CREATE SET` is part of a MERGE, not a CREATE)
+        assert not re.search(r"(?<!ON )\bCREATE\b", statement), name
+        # 3. anything that reads claims says which ones are current
+        if "RETURN" in statement and ":Claim" in statement and "MERGE" not in statement:
+            assert "valid_to IS NULL" in statement, name
+    # the schema statements are the one place CREATE is allowed (indexes, constraints)
+    assert all(s.startswith("CREATE ") for s in cypher.SCHEMA_STATEMENTS)
