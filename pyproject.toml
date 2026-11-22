@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.28.1",
     "inngest>=0.5.20",
     "openai>=3.57.0",
+    "pgvector>=0.5.1",
     "pydantic>=2.14.4",
     "pydantic-settings>=2.16.3",
     "pyyaml>=6.0.4",
@@ -50,7 +51,7 @@ python_version = "3.12"
 plugins = ["pydantic.mypy"]
 disallow_untyped_defs = true
 warn_unused_ignores = true
-files = ["commonplace", "scripts", "tests"]
+files = ["commonplace", "tests"]
 
 [[tool.mypy.overrides]]
 module = ["feedparser"]
@@ -60,5 +61,9 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-# trafilatura imports urllib3.contrib.socks unconditionally; we never use SOCKS.
-filterwarnings = ["ignore:SOCKS support in urllib3:urllib3.exceptions.DependencyWarning"]
+filterwarnings = [
+    # trafilatura imports urllib3.contrib.socks unconditionally; we never use SOCKS.
+    "ignore:SOCKS support in urllib3:urllib3.exceptions.DependencyWarning",
+    # raised inside the inngest SDK's own models, nothing we can change here
+    "ignore::pydantic.warnings.PydanticDeprecatedSince20:inngest.*",
+]

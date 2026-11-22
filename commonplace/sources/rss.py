@@ -1,38 +1,56 @@
+"""Feeds give us pointers to articles, never the articles themselves.
+
+A feed may carry the full post, a summary, or nothing. Ingest always fetches
+the page, so every article is parsed the same way.
+"""
+
 import calendar
 from datetime import UTC, datetime
 
 import feedparser
+import httpx
 from pydantic import BaseModel
 
-from commonplace.sources.urls import clean_url
+from commonplace.config import settings
+from commonplace.schemas.ids import clean_url
 
 
 class FeedEntry(BaseModel):
-    """What we take from a feed: a pointer to the article, never its content.
-
-    Feeds may carry the full post, a summary, or nothing; ingest always fetches
-    the page itself so every article is parsed the same way.
-    """
-
-    url: str
     title: str
-    author: str | None
+    url: str
+    author: str | None = None
     published_at: datetime
 
 
+async def fetch_feed(feed_url: str) -> bytes:
+    async with httpx.AsyncClient(
+        headers={"User-Agent": settings.user_agent},
+        timeout=settings.request_timeout_s,
+        follow_redirects=True,
+    ) as client:
+        response = await client.get(feed_url)
+        response.raise_for_status()
+        return response.content
+
+
 def parse_feed(raw: bytes) -> list[FeedEntry]:
+    """Entries in feed order. Unusable entries are skipped; an unusable feed is an error."""
     feed = feedparser.parse(raw)
+    if feed.bozo and not feed.entries:
+        raise ValueError(f"Feed did not parse: {feed.get('bozo_exception')}")
+
     entries = []
-    for e in feed.entries:
-        when = e.get("published_parsed") or e.get("updated_parsed")
-        if not e.get("link") or when is None:
+    for item in feed.entries:
+        link, title = item.get("link"), item.get("title")
+        when = item.get("published_parsed") or item.get("updated_parsed")
+        if not link or not title or when is None:
             continue
         entries.append(
             FeedEntry(
-                url=clean_url(e.link),
-                title=e.get("title", e.link),
-                author=e.get("author"),
+                title=title,
+                url=clean_url(link),  # feeds append ?utm_source=... to every link
+                author=item.get("author"),
                 published_at=datetime.fromtimestamp(calendar.timegm(when), UTC),
             )
         )
-    return sorted(entries, key=lambda x: x.published_at, reverse=True)
+    return entries

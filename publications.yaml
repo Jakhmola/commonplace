@@ -4,6 +4,8 @@ publications:
     name: Latent Space
     feed_url: https://www.latent.space/feed
     homepage: https://www.latent.space
+    # the feed links to the bare domain
+    archive_urls: [https://latent.space]
 
   - slug: interconnects
     name: Interconnects

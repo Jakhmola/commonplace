@@ -15,17 +15,20 @@ class Settings(BaseSettings):
 
     user_agent: str = "commonplace/0.1"
     request_timeout_s: float = 20.0
-    max_page_bytes: int = 5_000_000
+    max_article_bytes: int = 5_000_000
 
     # Characters per passage, and characters repeated between neighbours.
     chunk_size: int = 1000
     chunk_overlap: int = 150
+    publications_file: str = "publications.yaml"
     # How many of a feed's newest entries add-publication ingests.
     discovery_limit: int = 5
 
     embedding_model: str = "text-embedding-3-small"
-    embedding_dim: int = 1536
-    embedding_usd_per_mtok: float = 0.02
+    embedding_dimensions: int = 1536
+    embedding_batch_size: int = 96
+    # text-embedding-3-small list price; embeddings have no output tokens.
+    embedding_price_per_million_tokens: float = 0.02
 
 
 settings = Settings()

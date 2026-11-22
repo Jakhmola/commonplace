@@ -7,97 +7,111 @@ is paid for twice. Every write is an upsert, so re-sending the event is safe.
 """
 
 from typing import Any
-from uuid import UUID
 
 import inngest
 
-from commonplace import db
 from commonplace.config import settings
-from commonplace.events import (
+from commonplace.db.queries import replace_passages, upsert_article
+from commonplace.db.session import get_session
+from commonplace.inngest_client import client
+from commonplace.schemas.events import (
     ARTICLE_DISCOVERED,
     ARTICLE_INGESTED,
     ArticleDiscovered,
     ArticleIngested,
     event,
 )
-from commonplace.inngest_client import client
-from commonplace.sources.allowlist import NotAllowed, assert_allowed, load_publications
-from commonplace.sources.chunk import chunk
-from commonplace.sources.embed import cost_usd, embed, pack, unpack
-from commonplace.sources.fetch import FetchRefused, fetch
-from commonplace.sources.parse import ArticleText, extract_article
+from commonplace.sources.allowlist import assert_allowed, load_publications
+from commonplace.sources.chunking import chunk_text
+from commonplace.sources.embedder import embed_texts, pack, unpack
+from commonplace.sources.fetcher import FetchError, fetch_article
+from commonplace.sources.parser import ParsedArticle, parse_html
 
 
 @client.create_function(
     fn_id="ingest-article",
     trigger=inngest.TriggerEvent(event=ARTICLE_DISCOVERED),
+    # At most 3 articles of one publication at a time: polite to its server,
+    # and one large feed cannot starve the others.
+    concurrency=[inngest.Concurrency(key="event.data.publication_id", limit=3)],
     retries=3,
 )
 async def ingest_article(ctx: inngest.Context) -> dict[str, object]:
-    d = ArticleDiscovered.model_validate(ctx.event.data)
+    payload = ArticleDiscovered.model_validate(ctx.event.data)
 
     async def check_allowlist() -> None:
         try:
-            assert_allowed(d.url, load_publications())
-        except NotAllowed as e:
-            raise inngest.NonRetriableError(str(e)) from e
+            assert_allowed(payload.url, load_publications())
+        except ValueError as exc:
+            raise inngest.NonRetriableError(str(exc)) from exc
 
     await ctx.step.run("check-allowlist", check_allowlist)
 
-    async def fetch_html() -> dict[str, str]:
+    async def fetch_html() -> dict[str, object]:
         try:
-            final_url, body = await fetch(d.url)
-        except FetchRefused as e:
-            raise inngest.NonRetriableError(str(e)) from e
-        return {"url": final_url, "html": body.decode("utf-8", errors="replace")}
+            page = await fetch_article(payload.url)
+        except FetchError as exc:
+            raise inngest.NonRetriableError(str(exc)) from exc
+        return {"url": page.url, "html": page.html, "status_code": page.status_code}
 
     page = await ctx.step.run("fetch-html", fetch_html)
 
     async def parse() -> dict[str, object]:
-        return extract_article(page["html"], page["url"]).model_dump(mode="json")
+        return parse_html(
+            str(page["html"]), str(page["url"]), fallback_published_at=payload.published_at
+        ).model_dump(mode="json")
 
-    art = ArticleText.model_validate(await ctx.step.run("parse", parse))
+    article = ParsedArticle.model_validate(await ctx.step.run("parse", parse))
 
-    async def chunk_step() -> list[str]:
-        return chunk(art.text, settings.chunk_size, settings.chunk_overlap)
+    async def chunk() -> list[str]:
+        return chunk_text(
+            article.text, chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap
+        )
 
-    chunks = await ctx.step.run("chunk", chunk_step)
+    chunks = await ctx.step.run("chunk", chunk)
 
-    async def embed_step() -> dict[str, Any]:
-        vectors, tokens = await embed(chunks)
-        return {"vectors": [pack(v) for v in vectors], "tokens": tokens}
+    async def embed() -> dict[str, Any]:
+        result = await embed_texts(chunks)
+        # Packed, or a long article's vectors would not fit in a step output.
+        return {"vectors": [pack(v) for v in result["embeddings"]], "usage": result["usage"]}
 
-    embedded = await ctx.step.run("embed", embed_step)
+    embedded = await ctx.step.run("embed", embed)
 
-    async def persist() -> str:
-        tokens: int = embedded["tokens"]
-        async with db.tx() as conn:
-            article_id = await db.save_article(
-                conn,
-                canonical_id=d.canonical_id,
-                publication_id=d.publication_id,
-                url=page["url"],
-                # The feed's title/author are cleaner than page metadata
-                # (which appends the site name, or a stray "·" to the byline).
-                title=d.title,
-                author=d.author or art.author,
-                published_at=art.published_at or d.published_at,
-                content_hash=art.content_hash,
-                body=art.text,
-                chunks=chunks,
-                vectors=[unpack(v) for v in embedded["vectors"]],
-                embed_tokens=tokens,
-                embed_usd=cost_usd(tokens),
+    async def persist() -> dict[str, object]:
+        async with get_session() as session:
+            article_id = await upsert_article(
+                session,
+                canonical_id=payload.canonical_id,
+                publication_id=payload.publication_id,
+                url=str(page["url"]),
+                # The feed's title and byline are cleaner than page metadata,
+                # which appends the site name or a stray separator.
+                title=payload.title or article.title,
+                author=payload.author or article.author,
+                published_at=article.published_at,
+                content_hash=article.content_hash,
+                text=article.text,
             )
-        return str(article_id)
+            passage_count = await replace_passages(
+                session,
+                article_id=article_id,
+                passages=[
+                    {"chunk_index": i, "text": text, "embedding": unpack(vector)}
+                    for i, (text, vector) in enumerate(
+                        zip(chunks, embedded["vectors"], strict=True)
+                    )
+                ],
+            )
+            await session.commit()
+        return {"article_id": str(article_id), "passage_count": passage_count}
 
-    article_id = await ctx.step.run("persist", persist)
+    persisted = await ctx.step.run("persist", persist)
 
     done = ArticleIngested(
-        canonical_id=d.canonical_id,
-        article_id=UUID(article_id),
-        content_hash=art.content_hash,
-        passages=len(chunks),
+        canonical_id=payload.canonical_id,
+        article_id=persisted["article_id"],
+        content_hash=article.content_hash,
+        passage_count=persisted["passage_count"],
     )
     await ctx.step.send_event("emit", event(ARTICLE_INGESTED, done))
-    return {"article_id": article_id, "passages": len(chunks)}
+    return persisted

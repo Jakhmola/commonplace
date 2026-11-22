@@ -3,13 +3,16 @@ import re
 _WS = re.compile(r"\s")
 
 
-def chunk(text: str, size: int = 1000, overlap: int = 150) -> list[str]:
-    """Split text into windows of at most `size` chars that overlap by about `overlap`.
+def chunk_text(text: str, *, chunk_size: int, chunk_overlap: int) -> list[str]:
+    """Split text into windows of at most `chunk_size` chars that overlap by about `chunk_overlap`.
 
     Cuts only on whitespace, so no word is split. Each window after the first
     starts at the first word boundary inside the last `overlap` chars of the
     previous one, so an idea sitting on a boundary is whole in at least one chunk.
     """
+    if chunk_overlap >= chunk_size:
+        raise ValueError("chunk_overlap must be smaller than chunk_size")
+    size, overlap = chunk_size, chunk_overlap
     text = text.strip()
     if len(text) <= size:
         return [text] if text else []
