@@ -14,14 +14,21 @@ import httpx
 import openai
 
 from commonplace.config import settings
-from commonplace.db.queries import get_job_status, upsert_publication
+from commonplace.db.queries import (
+    get_job_status,
+    list_publications_with_stats,
+    upsert_publication,
+)
 from commonplace.db.session import get_session
+from commonplace.functions.ask import ask_question
 from commonplace.inngest_client import client
 from commonplace.retrieval import dense, hybrid, sparse
 from commonplace.schemas.events import (
     ARTICLE_DISCOVERED,
+    FEED_POLL,
     PUBLICATION_ADDED,
     ArticleDiscovered,
+    FeedPoll,
     PublicationAdded,
     event,
 )
@@ -41,7 +48,7 @@ class OperationError(Exception):
 
 def _handle(event_id: str, **extra: Any) -> dict[str, Any]:
     trace_url = f"{settings.inngest_base_url}/event/{event_id}"
-    return {"event_id": event_id, "trace_url": trace_url, "status": "queued", **extra}
+    return {"event_id": event_id, "trace_url": trace_url, **{"status": "queued", **extra}}
 
 
 # --- writes: send an event, return a handle ---
@@ -51,6 +58,39 @@ async def queue_publication(feed_url: str) -> dict[str, Any]:
     """Queue a backfill of one feed. An unlisted feed is rejected by the function itself."""
     (event_id,) = await client.send(event(PUBLICATION_ADDED, PublicationAdded(feed_url=feed_url)))
     return _handle(event_id)
+
+
+def _publications(named: str | None) -> list[PublicationEntry]:
+    """The allowlisted publications a caller means: one by slug or feed URL, or all of them."""
+    publications = load_publications()
+    if named in (None, "all"):
+        return publications
+    chosen = [p for p in publications if named in (p.slug, p.feed_url)]
+    if not chosen:
+        raise OperationError(404, f"Publication {named!r} is not in publications.yaml")
+    return chosen
+
+
+async def queue_backfill(publication: str = "all") -> dict[str, Any]:
+    """Queue a backfill for one publication (slug or feed URL) or for all of them."""
+    chosen = _publications(publication)
+    event_ids = await client.send(
+        [event(PUBLICATION_ADDED, PublicationAdded(feed_url=p.feed_url)) for p in chosen]
+    )
+    return {
+        "status": "queued",
+        "jobs": [
+            {"publication": p.slug, **_handle(event_id)}
+            for p, event_id in zip(chosen, event_ids, strict=True)
+        ],
+    }
+
+
+async def trigger_poll(publication: str | None = None) -> dict[str, Any]:
+    """Check feeds for new articles now instead of waiting for the schedule."""
+    slug = _publications(publication)[0].slug if publication else None
+    (event_id,) = await client.send(event(FEED_POLL, FeedPoll(publication=slug)))
+    return _handle(event_id, status="poll_triggered")
 
 
 def resolve_manual_article(
@@ -175,3 +215,14 @@ async def search(query: str, mode: str = "hybrid", limit: int = 5) -> list[dict[
     except openai.OpenAIError as exc:
         # Only `dense` gets here: hybrid falls back to keywords on its own.
         raise OperationError(502, f"The embedding provider failed: {exc}") from exc
+
+
+async def ask(question: str, limit: int | None = None) -> dict[str, Any]:
+    """An answer with inline citations, from retrieved passages only."""
+    async with get_session() as session:
+        return await ask_question(session, question, limit)
+
+
+async def list_publications() -> list[dict[str, Any]]:
+    async with get_session() as session:
+        return await list_publications_with_stats(session)

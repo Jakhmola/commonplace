@@ -6,10 +6,13 @@ No Docker or keys needed. Tests that need Postgres live in tests/integration.
 import inngest
 import pytest
 import respx
+from mcp.server.mcpserver.exceptions import ToolError
 
 from commonplace.functions.freshness import poll_feeds, publications_to_poll
 from commonplace.functions.ingest import classify_change
 from commonplace.functions.ops import failure_from_event, handle_function_failed
+from commonplace.mcp import tools
+from commonplace.mcp.server import mcp
 from commonplace.schemas.events import ARTICLE_UPDATED, ArticleUpdated
 from commonplace.sources.allowlist import PublicationEntry
 from commonplace.sources.rss import fetch_feed_conditional
@@ -153,3 +156,36 @@ def test_the_failure_handler_ignores_its_own_failures() -> None:
 def test_the_failure_handler_listens_to_inngest_itself() -> None:
     (trigger,) = handle_function_failed.get_config("http://localhost:8000").main.triggers
     assert getattr(trigger, "event", None) == "inngest/function.failed"
+
+
+# --- MCP: the knowledge base as tools for an agent ---
+
+READ_TOOLS = {"cp_health", "cp_search", "cp_ask", "cp_job_status", "cp_list_publications"}
+TRIGGER_TOOLS = {"cp_add_publication", "cp_backfill", "cp_sync"}
+
+
+async def test_the_server_registers_the_eight_tools() -> None:
+    names = {tool.name for tool in await mcp.list_tools()}
+    assert names == READ_TOOLS | TRIGGER_TOOLS
+    assert all(tool.description for tool in await mcp.list_tools())  # an agent reads these
+
+
+async def test_read_tools_are_marked_read_only_and_none_are_destructive() -> None:
+    for tool in await mcp.list_tools():
+        assert tool.annotations is not None
+        assert tool.annotations.read_only_hint is (tool.name in READ_TOOLS), tool.name
+        assert tool.annotations.destructive_hint is False, tool.name
+
+
+async def test_search_limit_is_bounded_in_the_schema() -> None:
+    (search,) = [tool for tool in await mcp.list_tools() if tool.name == "cp_search"]
+    limit = search.input_schema["properties"]["limit"]
+    assert (limit["minimum"], limit["maximum"], limit["default"]) == (1, 25, 5)
+    assert search.input_schema["required"] == ["query"]
+
+
+async def test_unknown_publication_is_a_tool_error() -> None:
+    with pytest.raises(ToolError, match="not in publications.yaml"):
+        await tools.cp_backfill("no-such-publication")
+    with pytest.raises(ToolError, match="not in publications.yaml"):
+        await tools.cp_sync("no-such-publication")

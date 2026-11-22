@@ -12,6 +12,7 @@ dependencies = [
     "feedparser>=6.0.14",
     "httpx>=0.28.1",
     "inngest>=0.5.20",
+    "mcp>=2.3.0",
     "openai>=3.57.0",
     "pgvector>=0.5.1",
     "pydantic>=2.14.4",
@@ -21,6 +22,9 @@ dependencies = [
     "trafilatura>=2.3.1",
     "uvicorn[standard]>=0.54.0",
 ]
+
+[project.scripts]
+cp-mcp = "commonplace.mcp.server:main"
 
 [dependency-groups]
 dev = [

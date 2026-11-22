@@ -8,9 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from commonplace import operations
-from commonplace.db.session import get_session
 from commonplace.functions import FUNCTIONS
-from commonplace.functions.ask import ask_question
 from commonplace.health import check_health
 from commonplace.inngest_client import client
 from commonplace.schemas.events import PublicationAdded
@@ -69,5 +67,4 @@ class AskRequest(BaseModel):
 @app.post("/ask")
 async def ask(payload: AskRequest) -> dict[str, Any]:
     """Answer a question with inline citations. A read: it never creates an Inngest run."""
-    async with get_session() as session:
-        return await ask_question(session, payload.question, payload.limit)
+    return await operations.ask(payload.question, payload.limit)

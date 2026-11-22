@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "commonplace": {
+      "command": "uv",
+      "args": ["run", "cp-mcp"]
+    }
+  }
+}

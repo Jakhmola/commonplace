@@ -46,6 +46,34 @@ async def list_publications(session: AsyncSession) -> list[Publication]:
     return list((await session.execute(select(Publication).order_by(Publication.slug))).scalars())
 
 
+async def list_publications_with_stats(session: AsyncSession) -> list[dict[str, Any]]:
+    """Every publication with its article count and polling state."""
+    stmt = (
+        select(Publication, func.count(Article.id), Cursor)
+        .outerjoin(Article, Article.publication_id == Publication.id)
+        .outerjoin(Cursor, Cursor.publication_id == Publication.id)
+        .group_by(Publication.id, Cursor.publication_id)
+        .order_by(Publication.slug)
+    )
+    return [
+        {
+            "id": str(pub.id),
+            "slug": pub.slug,
+            "name": pub.name,
+            "feed_url": pub.feed_url,
+            "homepage": pub.homepage,
+            "active": pub.active,
+            "article_count": article_count,
+            "last_checked_at": (
+                cursor.last_checked_at.isoformat() if cursor and cursor.last_checked_at else None
+            ),
+            "poll_count": cursor.poll_count if cursor else 0,
+            "not_modified_count": cursor.not_modified_count if cursor else 0,
+        }
+        for pub, article_count, cursor in (await session.execute(stmt)).all()
+    ]
+
+
 # --- polling cursors ---
 
 
