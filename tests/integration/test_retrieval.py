@@ -24,7 +24,10 @@ async def test_a_question_still_matches_on_its_rare_terms(
     )
     # Requiring every word of a question to appear in one passage matches almost nothing.
     question = "How does the quokkazebra framework compare to wombatokapi for agents?"
-    assert await _found(db, question) == ["an overview of the quokkazebra framework"]
+    hits = await search_passages_bm25(db, question, 5)
+    # Hundreds of passages contain "agents" or "compare"; the one with the rare term wins.
+    assert hits[0]["text"] == "an overview of the quokkazebra framework"
+    assert hits[0]["url"] == ARTICLE_URL
 
 
 async def test_passages_matching_more_of_the_query_rank_higher(

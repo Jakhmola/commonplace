@@ -4,11 +4,21 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Row, Select, Text, cast, func, select, update
-from sqlalchemy.dialects.postgresql import TSQUERY, insert
+from sqlalchemy import Row, Select, func, select, update
+from sqlalchemy import text as sql_text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from commonplace.db.models import Article, Cost, Cursor, Job, Passage, Publication, Snapshot
+from commonplace.db.models import (
+    Article,
+    Cost,
+    Cursor,
+    Failure,
+    Job,
+    Passage,
+    Publication,
+    Snapshot,
+)
 
 # --- publications ---
 
@@ -290,35 +300,56 @@ def _hit(row: Row[Any]) -> dict[str, Any]:
     }
 
 
+# Each term of the query that a passage contains adds that term's rarity (inverse
+# document frequency, in BM25's form) to the passage's score. A passage matches
+# if it has any of the terms, so a question-shaped query still finds something,
+# and a rare term outweighs any number of common ones.
+# ponytail: term frequency and passage length are ignored (passages are all about
+# the same size); use a real BM25 index if ranking within one term starts to matter.
+_KEYWORD_SEARCH = sql_text("""
+    WITH corpus AS (
+        SELECT count(*)::float AS total FROM passages WHERE valid_to IS NULL
+    ), terms AS (
+        SELECT quote_literal(lexeme)::tsquery AS term
+        FROM unnest(tsvector_to_array(to_tsvector('english', :query))) AS lexeme
+    ), weighted AS (
+        SELECT term, ln(1 + (total - df + 0.5) / (df + 0.5)) AS idf
+        FROM corpus, terms, LATERAL (
+            SELECT count(*) AS df FROM passages WHERE valid_to IS NULL AND tsv @@ term
+        ) AS frequency
+        WHERE df > 0
+    )
+    SELECT p.id, p.text, a.title, a.author, a.url, a.published_at, sum(w.idf) AS rank
+    FROM weighted w
+    JOIN passages p ON p.valid_to IS NULL AND p.tsv @@ w.term
+    JOIN articles a ON a.id = p.article_id
+    GROUP BY p.id, a.id
+    ORDER BY rank DESC, p.id
+    LIMIT :limit
+""")
+
+
 async def search_passages_bm25(
     session: AsyncSession, query: str, limit: int
 ) -> list[dict[str, Any]]:
-    """Full-text search over the generated `tsv` column (GIN index).
+    """Keyword search over the generated `tsv` column (GIN index).
 
-    A passage matches when it contains any of the query's terms; passages that
-    contain all of them come first, then by rank. Requiring every term would
-    make a question-shaped query ("how does X compare to Y for agents?") match
-    almost nothing. A query with double quotes is taken literally instead:
-    phrases must match exactly and every term is required.
+    A query with double quotes is taken literally: phrases must match exactly
+    and every term is required. Anything else is ranked by term rarity.
     """
-    all_terms = (
-        func.websearch_to_tsquery("english", query)
-        if '"' in query
-        else func.plainto_tsquery("english", query)
-    )
-    # plainto_tsquery normalises the words, drops stop words and joins them with
-    # `&`; swapping the operator turns "all of these" into "any of these".
-    any_term = (
-        all_terms if '"' in query else cast(func.replace(cast(all_terms, Text), "&", "|"), TSQUERY)
-    )
-    rank = func.ts_rank(Passage.tsv, any_term)
-    stmt = (
-        _passage_hits(rank)
-        .where(Passage.tsv.op("@@")(any_term))
-        .order_by(Passage.tsv.op("@@")(all_terms).desc(), rank.desc(), Passage.id)
-        .limit(limit)
-    )
-    return [_hit(row) for row in (await session.execute(stmt)).all()]
+    if '"' in query:
+        tsquery = func.websearch_to_tsquery("english", query)
+        rank = func.ts_rank(Passage.tsv, tsquery)
+        stmt = (
+            _passage_hits(rank)
+            .where(Passage.tsv.op("@@")(tsquery))
+            .order_by(rank.desc(), Passage.id)
+            .limit(limit)
+        )
+        rows = (await session.execute(stmt)).all()
+    else:
+        rows = (await session.execute(_KEYWORD_SEARCH, {"query": query, "limit": limit})).all()
+    return [_hit(row) for row in rows]
 
 
 async def search_passages_dense(
