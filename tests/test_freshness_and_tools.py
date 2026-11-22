@@ -9,6 +9,7 @@ import respx
 
 from commonplace.functions.freshness import poll_feeds, publications_to_poll
 from commonplace.functions.ingest import classify_change
+from commonplace.functions.ops import failure_from_event, handle_function_failed
 from commonplace.schemas.events import ARTICLE_UPDATED, ArticleUpdated
 from commonplace.sources.allowlist import PublicationEntry
 from commonplace.sources.rss import fetch_feed_conditional
@@ -112,3 +113,43 @@ def test_article_updated_carries_the_new_hash_and_count() -> None:
     )
     assert ARTICLE_UPDATED == "cp/article.updated"
     assert updated.model_dump(mode="json")["passage_count"] == 7
+
+
+# --- failed runs: recorded from Inngest's own failure event ---
+
+FAILED_EVENT = {
+    "function_id": "commonplace-ingest-article",
+    "run_id": "01M82RUN",
+    "error": {
+        "name": "NonRetriableError",
+        "message": "URL is outside the allowlist (publications.yaml): 'https://example.com/p/x'",
+        "stack": 'Traceback (most recent call last):\n  File "/home/me/project/ingest.py" ...',
+    },
+    "event": {
+        "name": "cp/article.discovered",
+        "data": {"canonical_id": "pub:latent-space:x", "url": "https://example.com/p/x"},
+    },
+}
+
+
+def test_a_failure_event_becomes_a_row_without_the_stack_trace() -> None:
+    failure = failure_from_event(FAILED_EVENT)
+    assert failure == {
+        "function_id": "commonplace-ingest-article",
+        "run_id": "01M82RUN",
+        "error": "URL is outside the allowlist (publications.yaml): 'https://example.com/p/x'",
+        "event_data": FAILED_EVENT["event"],
+    }
+    # an error that is not a dict, and an event that is missing, still make a row
+    bare = failure_from_event({"function_id": "f", "run_id": "r", "error": "boom"})
+    assert bare == {"function_id": "f", "run_id": "r", "error": "boom", "event_data": None}
+
+
+def test_the_failure_handler_ignores_its_own_failures() -> None:
+    own = {**FAILED_EVENT, "function_id": "commonplace-handle-function-failed"}
+    assert failure_from_event(own) is None  # or one failure would record itself forever
+
+
+def test_the_failure_handler_listens_to_inngest_itself() -> None:
+    (trigger,) = handle_function_failed.get_config("http://localhost:8000").main.triggers
+    assert getattr(trigger, "event", None) == "inngest/function.failed"

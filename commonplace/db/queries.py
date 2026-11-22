@@ -224,25 +224,69 @@ async def get_job(session: AsyncSession, event_id: str) -> Job | None:
 
 
 async def get_job_status(session: AsyncSession, event_id: str) -> dict[str, Any] | None:
-    """Progress counted from the articles that actually exist, then written back.
+    """Progress counted from what actually exists, then written back.
 
     `ingest-article` never learns which job asked for it, so nothing increments
-    a counter: `done` is how many of the job's expected articles are stored.
-    The caller commits to keep the repaired `done`/`status`.
+    a counter. `done` is how many of the job's expected articles are stored, and
+    `failed` how many of the rest have a recorded failure. A job is settled once
+    every expected article is one or the other. The caller commits to keep the
+    repaired `done`/`status`.
     """
     job = await get_job(session, event_id)
     if job is None:
         return None
-    job.done = len(await get_existing_canonical_ids(session, job.canonical_ids))
+    stored = await get_existing_canonical_ids(session, job.canonical_ids)
+    missing = [cid for cid in job.canonical_ids if cid not in stored]
+    errors = await get_failures_for(session, missing)
+
+    job.done = len(stored)
     if job.done >= job.total:
         job.status = "completed"
+    elif job.done + len(errors) >= job.total:
+        job.status = "failed"
+    else:
+        job.status = "running"
     return {
         "event_id": job.event_id,
         "kind": job.kind,
         "status": job.status,
         "total": job.total,
         "done": job.done,
+        "failed": len(errors),
+        "errors": list(errors.values()),
     }
+
+
+# --- failures ---
+
+
+async def record_failure(
+    session: AsyncSession,
+    *,
+    function_id: str,
+    run_id: str,
+    error: str,
+    event_data: dict[str, Any] | None = None,
+) -> uuid.UUID:
+    failure = Failure(
+        id=uuid.uuid4(), function_id=function_id, run_id=run_id, error=error, event_data=event_data
+    )
+    session.add(failure)
+    await session.flush()
+    return failure.id
+
+
+async def get_failures_for(session: AsyncSession, canonical_ids: list[str]) -> dict[str, str]:
+    """canonical id -> latest error, for articles whose ingest run failed for good."""
+    if not canonical_ids:
+        return {}
+    failed_id = Failure.event_data["data"]["canonical_id"].astext
+    stmt = (
+        select(failed_id, Failure.error)
+        .where(failed_id.in_(canonical_ids))
+        .order_by(Failure.created_at)
+    )
+    return {cid: error for cid, error in (await session.execute(stmt)).all()}
 
 
 # --- costs ---

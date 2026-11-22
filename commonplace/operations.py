@@ -151,13 +151,13 @@ async def job_status(event_id: str) -> dict[str, Any]:
         raise OperationError(404, f"No job or Inngest run found for event_id={event_id!r}.")
 
     return {
-        # An article whose ingest fails for good is not counted here yet, so its
-        # job stays "running"; recording failed runs is what closes that gap.
         "status": job_state(job, run_status, failures),
         "articles_done": job["done"] if job else None,
         "articles_total": job["total"] if job else None,
+        "articles_failed": job["failed"] if job else None,
         "run_status": run_status,
-        "failures": failures,
+        # Why the triggering run failed, then why any of its articles did.
+        "failures": failures + (job["errors"] if job else []),
         "trace_url": f"{settings.inngest_base_url}/event/{event_id}",
     }
 
