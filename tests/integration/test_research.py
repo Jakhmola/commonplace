@@ -72,6 +72,26 @@ async def test_a_research_run_is_started_once_and_finished(db: AsyncSession) -> 
     assert await get_research_run(db, "res_does_not_exist") is None
 
 
+async def test_a_queued_run_becomes_running_and_a_finished_one_stays_finished(
+    db: AsyncSession,
+) -> None:
+    async def status() -> str:
+        run = await get_research_run(db, "res_itest_2")
+        assert run is not None
+        return str(run["status"])
+
+    start = {"research_id": "res_itest_2", "event_id": "evt-2", "question": "Q?"}
+    await start_research_run(db, **start, status="queued")  # the API, right after sending
+    assert await status() == "queued"
+    await start_research_run(db, **start, status="running")  # the function's first step
+    assert await status() == "running"
+    await start_research_run(db, **start, status="queued")  # the API lost the race: no step back
+    assert await status() == "running"
+    await finish_research_run(db, research_id="res_itest_2", status="completed")
+    await start_research_run(db, **start, status="running")  # a replayed first step
+    assert await status() == "completed"
+
+
 def _digest(digest_id: uuid.UUID, start: datetime, text: str) -> dict[str, Any]:
     return {
         "digest_id": digest_id,

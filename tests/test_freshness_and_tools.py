@@ -169,11 +169,12 @@ READ_TOOLS = {
     "cp_list_publications",
     "cp_sources",
     "cp_eval_report",
+    "cp_research_result",
 }
-TRIGGER_TOOLS = {"cp_add_publication", "cp_backfill", "cp_sync"}
+TRIGGER_TOOLS = {"cp_add_publication", "cp_backfill", "cp_sync", "cp_research"}
 
 
-async def test_the_server_registers_the_ten_tools() -> None:
+async def test_the_server_registers_every_tool() -> None:
     names = {tool.name for tool in await mcp.list_tools()}
     assert names == READ_TOOLS | TRIGGER_TOOLS
     assert all(tool.description for tool in await mcp.list_tools())  # an agent reads these

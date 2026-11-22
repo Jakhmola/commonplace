@@ -899,14 +899,23 @@ async def get_latest_eval_report(session: AsyncSession, limit: int = 10) -> dict
 
 
 async def start_research_run(
-    session: AsyncSession, *, research_id: str, event_id: str | None, question: str
+    session: AsyncSession,
+    *,
+    research_id: str,
+    event_id: str | None,
+    question: str,
+    status: str = "running",
 ) -> None:
-    """Record that a run has begun. A replay of the step leaves the row as it is."""
+    """Record a run as `queued` (by the API) or `running` (by the function).
+
+    Safe in either order and on replay: an existing row only ever moves from
+    queued to running, and a run that has finished is left alone.
+    """
     stmt = insert(ResearchRun).values(
         research_id=research_id,
         event_id=event_id,
         question=question,
-        status="running",
+        status=status,
         plan={},
         hops=[],
         citations=[],
@@ -916,7 +925,13 @@ async def start_research_run(
         total_cost_usd=0,
         latency_ms=0,
     )
-    await session.execute(stmt.on_conflict_do_nothing(index_elements=[ResearchRun.research_id]))
+    await session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[ResearchRun.research_id],
+            set_={"status": status},
+            where=ResearchRun.status == "queued",
+        )
+    )
 
 
 async def finish_research_run(session: AsyncSession, *, research_id: str, **fields: Any) -> None:

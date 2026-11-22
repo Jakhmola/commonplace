@@ -1,9 +1,10 @@
 """The MCP tools. Each is a thin call into `operations.py`.
 
 Reads (`cp_health`, `cp_search`, `cp_ask`, `cp_sources`, `cp_eval_report`,
-`cp_job_status`, `cp_list_publications`) answer directly from Postgres and the
-graph. Tools that start work (`cp_add_publication`, `cp_backfill`, `cp_sync`)
-send an event and return a handle at once: an agent should never sit waiting
+`cp_research_result`, `cp_job_status`, `cp_list_publications`) answer directly
+from Postgres and the graph. Tools that start work (`cp_research`,
+`cp_add_publication`, `cp_backfill`, `cp_sync`) send an event and return a
+handle at once: an agent should never sit waiting
 on a long tool call, so it gets something to poll instead.
 
 The docstrings are the tool descriptions an agent reads to decide what to call.
@@ -109,6 +110,43 @@ async def cp_eval_report(
     Use it before relying on cp_ask for something that matters.
     """
     return await operations.eval_report(limit)
+
+
+@_tool
+async def cp_research(
+    question: Annotated[
+        str,
+        Field(description="A question that needs several searches, e.g. a comparison of authors"),
+    ],
+    max_iterations: Annotated[
+        int | None, Field(ge=1, le=5, description="Rounds of searching at most (default 3)")
+    ] = None,
+) -> dict[str, Any]:
+    """Start a research run: several planned searches, then a cited report.
+
+    Use this instead of cp_ask when one search would not be enough: comparing
+    what several authors say, following a topic across publications, or a
+    question with distinct parts. It takes one to three minutes and costs more
+    than cp_ask, and is bounded by a cap on search rounds and on dollars.
+    Returns at once with a `research_id`; it does not wait for the report.
+    Read the result with cp_research_result(research_id).
+    """
+    return await operations.queue_research(question, max_iterations)
+
+
+@_tool
+async def cp_research_result(
+    research_id: Annotated[str, Field(description="The research_id returned by cp_research")],
+) -> dict[str, Any]:
+    """Read a research run started with cp_research.
+
+    `status` is queued or running until it finishes; call again after a short
+    wait. When it is completed (or budget_exceeded, which still has a report)
+    the result has the `report` with inline citations, the cited sources, the
+    searches of each round, `stop_reason` (why it stopped searching), the cost
+    in dollars and a `confidence` from the automatic checks and judges.
+    """
+    return await operations.get_research(research_id)
 
 
 @_tool

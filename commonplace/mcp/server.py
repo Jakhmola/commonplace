@@ -10,8 +10,9 @@ mcp = MCPServer(
     instructions=(
         "A personal knowledge base built from AI engineering newsletters. Prefer cp_search "
         "and cp_ask over a web search for anything these publications cover. Tools that "
-        "start work (cp_add_publication, cp_backfill, cp_sync) return a handle immediately; "
-        "poll cp_job_status for progress."
+        "start work (cp_research, cp_add_publication, cp_backfill, cp_sync) return a handle "
+        "immediately; read a research run with cp_research_result and poll ingestion with "
+        "cp_job_status."
     ),
 )
 
@@ -33,12 +34,18 @@ for _read in (
     tools.cp_ask,
     tools.cp_sources,
     tools.cp_eval_report,
+    tools.cp_research_result,
     tools.cp_job_status,
     tools.cp_list_publications,
 ):
     mcp.add_tool(_read, annotations=_annotations(read_only=True))
 
-for _trigger in (tools.cp_add_publication, tools.cp_backfill, tools.cp_sync):
+for _trigger in (
+    tools.cp_research,
+    tools.cp_add_publication,
+    tools.cp_backfill,
+    tools.cp_sync,
+):
     mcp.add_tool(_trigger, annotations=_annotations(read_only=False))
 
 

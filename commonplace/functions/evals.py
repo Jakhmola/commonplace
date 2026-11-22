@@ -106,6 +106,77 @@ async def judge_once(agent: Agent[BinaryVerdict], judge_input: str) -> dict[str,
     return {**verdict.model_dump(), "usage": result["usage"]}
 
 
+async def score_answer(
+    step: Any,
+    *,
+    question: str,
+    answer_text: str,
+    citations: list[dict[str, Any]],
+    retrieved: list[dict[str, Any]],
+    prompt_limit: int,
+) -> dict[str, Any]:
+    """Every evaluator applied to one answer, each as its own step.
+
+    `{checks, faithfulness, disagreement, failure_codes, composite_score,
+    judge_usd}`. Used for answers from `/ask` and for research reports alike:
+    `retrieved` is everything that was found, with `in_prompt` on what the
+    writer was shown.
+    """
+
+    async def score_deterministic() -> dict[str, Any]:
+        async with get_session() as session:
+            superseded = await get_superseded_ids(
+                session,
+                passage_ids=[c["passage_id"] for c in citations if c.get("passage_id")],
+                claim_ids=[c["claim_id"] for c in citations if c.get("claim_id")],
+            )
+        result = run_deterministic_checks(
+            answer_text=answer_text,
+            citations=citations,
+            retrieved=retrieved,
+            prompt_limit=prompt_limit,
+            superseded_ids=frozenset(superseded),
+        )
+        return asdict(result)
+
+    checks = await step.run("score-deterministic", score_deterministic)
+    failure_codes: list[str] = list(checks["failure_codes"])
+    judge_input = format_judge_input(
+        question=question, retrieved=retrieved, answer_text=answer_text, prompt_limit=prompt_limit
+    )
+    judge_usd = 0.0
+
+    async def judge(agent: Agent[BinaryVerdict], step_id: str) -> dict[str, Any]:
+        """One judge as one step. Without a key nothing runs and the verdict says so."""
+        nonlocal judge_usd
+        if not settings.anthropic_api_key:
+            return {"verdict": SKIPPED, "critique": "No ANTHROPIC_API_KEY: the judge did not run."}
+        verdict: dict[str, Any] = await step.run(step_id, judge_once, agent, judge_input)
+        judge_usd += (verdict.pop("usage", None) or {}).get("est_usd", 0.0)
+        if verdict["verdict"] == "FAIL" and verdict["failure_code"] not in ("NONE", *failure_codes):
+            failure_codes.append(verdict["failure_code"])
+        return verdict
+
+    faithfulness = await judge(faithfulness_judge, "judge-faithfulness")
+    if requires_disagreement_check(retrieved, prompt_limit):
+        disagreement = await judge(disagreement_judge, "judge-disagreement")
+    else:
+        disagreement = {
+            "verdict": NOT_APPLICABLE,
+            "critique": "Fewer than two authors were in the prompt: nobody to disagree with.",
+        }
+    return {
+        "checks": checks,
+        "faithfulness": faithfulness,
+        "disagreement": disagreement,
+        "failure_codes": failure_codes,
+        "composite_score": composite_score(
+            checks["passed"], faithfulness["verdict"], disagreement["verdict"]
+        ),
+        "judge_usd": round(judge_usd, 6),
+    }
+
+
 @client.create_function(
     fn_id="evaluate-answer",
     trigger=inngest.TriggerEvent(event=ANSWER_PRODUCED),
@@ -130,57 +201,21 @@ async def evaluate_answer(ctx: inngest.Context) -> dict[str, object]:
     snapshot = await ctx.step.run("load-snapshot", load_snapshot)
     if snapshot is None:
         return {"snapshot_id": payload.snapshot_id, "status": "skipped_missing_snapshot"}
-    citations: list[dict[str, Any]] = snapshot["citations"]
-    retrieved: list[dict[str, Any]] = snapshot["retrieved"]
-    trace = {
-        "question": snapshot["question"],
-        "retrieved": retrieved,
-        "answer_text": snapshot["answer_text"],
-        "prompt_limit": settings.retrieval_limit,
-    }
-
-    async def score_deterministic() -> dict[str, Any]:
-        async with get_session() as session:
-            superseded = await get_superseded_ids(
-                session,
-                passage_ids=[c["passage_id"] for c in citations if c.get("passage_id")],
-                claim_ids=[c["claim_id"] for c in citations if c.get("claim_id")],
-            )
-        result = run_deterministic_checks(
-            answer_text=snapshot["answer_text"],
-            citations=citations,
-            retrieved=retrieved,
-            prompt_limit=settings.retrieval_limit,
-            superseded_ids=frozenset(superseded),
-        )
-        return asdict(result)
-
-    checks = await ctx.step.run("score-deterministic", score_deterministic)
-    failure_codes: list[str] = list(checks["failure_codes"])
-
-    async def judge(agent: Agent[BinaryVerdict], step_id: str) -> dict[str, Any]:
-        """One judge as one step. Without a key nothing runs and the verdict says so."""
-        if not settings.anthropic_api_key:
-            return {"verdict": SKIPPED, "critique": "No ANTHROPIC_API_KEY: the judge did not run."}
-
-        async def call() -> dict[str, Any]:
-            return await judge_once(agent, format_judge_input(**trace))
-
-        verdict = await ctx.step.run(step_id, call)
-        if verdict["verdict"] == "FAIL" and verdict["failure_code"] not in ("NONE", *failure_codes):
-            failure_codes.append(verdict["failure_code"])
-        return verdict
-
-    faithfulness = await judge(faithfulness_judge, "judge-faithfulness")
-    if requires_disagreement_check(retrieved, settings.retrieval_limit):
-        disagreement = await judge(disagreement_judge, "judge-disagreement")
-    else:
-        disagreement = {
-            "verdict": NOT_APPLICABLE,
-            "critique": "Fewer than two authors were in the prompt: nobody to disagree with.",
-        }
-
-    score = composite_score(checks["passed"], faithfulness["verdict"], disagreement["verdict"])
+    scores = await score_answer(
+        ctx.step,
+        question=snapshot["question"],
+        answer_text=snapshot["answer_text"],
+        citations=snapshot["citations"],
+        retrieved=snapshot["retrieved"],
+        prompt_limit=settings.retrieval_limit,
+    )
+    checks, faithfulness, disagreement = (
+        scores["checks"],
+        scores["faithfulness"],
+        scores["disagreement"],
+    )
+    failure_codes: list[str] = scores["failure_codes"]
+    score: float = scores["composite_score"]
 
     async def persist() -> str:
         async with get_session() as session:

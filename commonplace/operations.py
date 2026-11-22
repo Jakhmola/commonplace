@@ -19,8 +19,10 @@ from commonplace.config import settings
 from commonplace.db.queries import (
     get_job_status,
     get_latest_eval_report,
+    get_research_run,
     get_source_provenance,
     list_publications_with_stats,
+    start_research_run,
     upsert_publication,
 )
 from commonplace.db.session import get_session
@@ -32,13 +34,15 @@ from commonplace.schemas.events import (
     EVAL_RUN_REQUESTED,
     FEED_POLL,
     PUBLICATION_ADDED,
+    RESEARCH_REQUESTED,
     ArticleDiscovered,
     EvalRunRequested,
     FeedPoll,
     PublicationAdded,
+    ResearchRequested,
     event,
 )
-from commonplace.schemas.ids import canonical_id, clean_url
+from commonplace.schemas.ids import canonical_id, clean_url, research_id
 from commonplace.sources.allowlist import PublicationEntry, assert_allowed, load_publications
 
 _RETRIEVERS = {"hybrid": hybrid, "sparse": sparse, "dense": dense}
@@ -266,3 +270,43 @@ async def eval_report(limit: int = 10) -> dict[str, Any]:
     """How answers are scoring, which failure modes occur, and the last variant comparison."""
     async with get_session() as session:
         return await get_latest_eval_report(session, limit)
+
+
+# --- research ---
+
+
+async def _record_research(*, research_id: str, event_id: str, question: str) -> None:
+    async with get_session() as session:
+        await start_research_run(
+            session, research_id=research_id, event_id=event_id, question=question, status="queued"
+        )
+        await session.commit()
+
+
+async def queue_research(
+    question: str, max_iterations: int | None = None, max_usd: float | None = None
+) -> dict[str, Any]:
+    """Start a research run. Returns at once with a `research_id` to read the report by."""
+    rid = research_id()
+    requested = ResearchRequested(
+        research_id=rid, question=question, max_iterations=max_iterations, max_usd=max_usd
+    )
+    (event_id,) = await _send(event(RESEARCH_REQUESTED, requested))
+    # Written here as well as by the function, so the id can be polled before the run starts.
+    await _record_research(research_id=rid, event_id=event_id, question=question)
+    return _handle(event_id, research_id=rid)
+
+
+async def _load_research(research_id: str) -> dict[str, Any] | None:
+    async with get_session() as session:
+        return await get_research_run(session, research_id)
+
+
+async def get_research(research_id: str) -> dict[str, Any]:
+    """A research run: its status, and once it has finished the report with its
+    citations, the searches it ran, why it stopped, what it cost and how it scored.
+    """
+    run = await _load_research(research_id.strip())
+    if run is None:
+        raise OperationError(404, f"No research run has the id {research_id!r}")
+    return run

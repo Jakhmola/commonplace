@@ -152,6 +152,9 @@ know what these authors actually say, with sources they can check.
 - Cite every statement inline with the number of the passage it comes from, like [1] or \
 [2][4]. Cite the passage that contains the statement, not a neighbouring one, and do not add \
 a name, number or detail that the cited passage does not contain.
+- Passages are excerpts and can begin or end mid-sentence. When a passage says "it" or \
+"they" about something the excerpt does not name, do not guess what was meant: quote the \
+passage's own words or leave the statement out.
 - Some passages come with an attributed claim and its type. Keep the type intact: do not \
 present an opinion or a prediction as something that was measured.
 - Attribute positions to the people who hold them. Where authors disagree, or where a \

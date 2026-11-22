@@ -86,3 +86,28 @@ async def run_evals() -> dict[str, Any]:
 async def latest_evals(limit: int = Query(default=10, ge=1, le=50)) -> dict[str, Any]:
     """Pass rates, failure modes, recent failures with reasons, and the last variant comparison."""
     return await operations.eval_report(limit)
+
+
+class ResearchRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    # How many rounds of searching, and how many dollars, this run may use at most.
+    max_iterations: int | None = Field(default=None, ge=1, le=5)
+    max_usd: float | None = Field(default=None, gt=0, le=5)
+
+
+@app.post("/research")
+async def start_research(payload: ResearchRequest) -> dict[str, Any]:
+    """Investigate a question over several searches. Returns at once; read the
+    report with GET /research/{research_id}.
+    """
+    return await operations.queue_research(
+        payload.question, payload.max_iterations, payload.max_usd
+    )
+
+
+@app.get("/research/{research_id}")
+async def research_result(research_id: str) -> dict[str, Any]:
+    """Status of a research run, and once it has finished the report, its
+    citations, each round of searching, why it stopped, its cost and its scores.
+    """
+    return await operations.get_research(research_id)

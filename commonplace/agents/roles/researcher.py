@@ -167,7 +167,7 @@ def format_reflection_input(
         f"Question: {question}\n\n"
         f"Searches already run:\n{searches}\n\n"
         f"Evidence gathered so far ({len(pool)} passages; the best {min(limit, len(pool))} "
-        f"are shown):\n\n{format_context(pool[:limit])}"
+        f"are shown):\n\n{format_context(pool[:limit]) or '(nothing was found)'}"
     )
 
 

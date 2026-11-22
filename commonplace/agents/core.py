@@ -27,14 +27,17 @@ class Agent[T: BaseModel]:
     effort: Effort = "medium"
 
 
-async def run_agent[T: BaseModel](
+async def run_agent_step[T: BaseModel](
     step: Any,
     agent: Agent[T],
     user_input: str,
     step_id: str,
     article_id: uuid.UUID | None = None,
-) -> T | str:
-    """Run `agent` once as the step `step_id`; return its validated output."""
+) -> dict[str, Any]:
+    """Run `agent` once as the step `step_id`: `{"output", "usage", "stop_reason"}`.
+
+    For callers that need to know what the call cost, such as a loop with a budget.
+    """
 
     async def call() -> dict[str, Any]:
         return await call_llm(
@@ -47,7 +50,19 @@ async def run_agent[T: BaseModel](
             article_id=article_id,
         )
 
-    result = await step.run(step_id, call)
+    result: dict[str, Any] = await step.run(step_id, call)
+    return result
+
+
+async def run_agent[T: BaseModel](
+    step: Any,
+    agent: Agent[T],
+    user_input: str,
+    step_id: str,
+    article_id: uuid.UUID | None = None,
+) -> T | str:
+    """Run `agent` once as the step `step_id`; return its validated output."""
+    result = await run_agent_step(step, agent, user_input, step_id, article_id)
     if agent.output_schema is None:
         return str(result["output"] or "")
     # Validated again here: on a replay the output comes from Inngest's memo as plain JSON.
