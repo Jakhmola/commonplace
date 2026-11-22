@@ -5,7 +5,19 @@ description = "A personal knowledge base built from what I read: durable ingesti
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.20.1",
+    "asyncpg>=0.32.0",
+    "fastapi>=0.165.0",
+    "feedparser>=6.0.14",
+    "httpx>=0.28.1",
+    "inngest>=0.5.20",
+    "openai>=3.57.0",
+    "pydantic>=2.14.4",
     "pydantic-settings>=2.16.3",
+    "pyyaml>=6.0.4",
+    "sqlalchemy[asyncio]>=2.1.9",
+    "trafilatura>=2.3.1",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [dependency-groups]
@@ -13,7 +25,9 @@ dev = [
     "mypy>=2.4.1",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.5.0",
+    "respx>=0.23.1",
     "ruff>=0.17.6",
+    "types-pyyaml>=6.0.12.20261122",
 ]
 
 [build-system]
@@ -38,7 +52,13 @@ disallow_untyped_defs = true
 warn_unused_ignores = true
 files = ["commonplace", "tests"]
 
+[[tool.mypy.overrides]]
+module = ["feedparser"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# trafilatura imports urllib3.contrib.socks unconditionally; we never use SOCKS.
+filterwarnings = ["ignore:SOCKS support in urllib3:urllib3.exceptions.DependencyWarning"]

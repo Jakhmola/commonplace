@@ -1,0 +1,16 @@
+# The allowlist. Nothing outside these hosts is ever fetched.
+publications:
+  - slug: latent-space
+    name: Latent Space
+    feed_url: https://www.latent.space/feed
+    homepage: https://www.latent.space
+
+  - slug: interconnects
+    name: Interconnects
+    feed_url: https://www.interconnects.ai/feed
+    homepage: https://www.interconnects.ai
+
+  - slug: ahead-of-ai
+    name: Ahead of AI
+    feed_url: https://magazine.sebastianraschka.com/feed
+    homepage: https://magazine.sebastianraschka.com
