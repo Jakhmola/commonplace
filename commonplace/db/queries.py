@@ -139,7 +139,8 @@ async def create_job(
         .values(
             event_id=event_id,
             kind=kind,
-            status="running",
+            # A replay that finds nothing new is finished the moment it is recorded.
+            status="running" if canonical_ids else "completed",
             total=len(canonical_ids),
             done=0,
             publication_id=publication_id,
