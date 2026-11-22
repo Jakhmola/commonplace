@@ -10,6 +10,7 @@ answer with a `cp/answer.produced` event that the caller does not wait for.
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -72,9 +73,25 @@ def _citation(n: int, passage: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_BRACKETS = re.compile(r"\[\s*(\d+(?:\s*[,\-\u2013]\s*\d+)*)\s*\]")
+
+
+def _cited_numbers(answer_text: str) -> set[int]:
+    """Passage numbers an answer refers to: [1], [1][2], [1, 2] and [1-3] all count."""
+    numbers: set[int] = set()
+    for group in _BRACKETS.findall(answer_text):
+        for part in group.split(","):
+            first, _, last = part.replace("\u2013", "-").partition("-")
+            low, high = int(first), int(last or first)
+            if high - low < 50:  # a range, not two unrelated numbers far apart
+                numbers.update(range(low, high + 1))
+    return numbers
+
+
 def cited(answer_text: str, passages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Citations for the passages whose number actually appears in the answer."""
-    return [_citation(n, p) for n, p in enumerate(passages, start=1) if f"[{n}]" in answer_text]
+    """Citations for the passages the answer actually refers to."""
+    numbers = _cited_numbers(answer_text)
+    return [_citation(n, p) for n, p in enumerate(passages, start=1) if n in numbers]
 
 
 async def synthesize(
@@ -100,13 +117,18 @@ async def synthesize(
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-    except anthropic.APIError as exc:
+    except Exception as exc:
+        # Not only API errors: the SDK also raises plain exceptions before sending.
         logger.exception("LLM synthesis failed")
         return f"LLM synthesis failed ({type(exc).__name__}): {exc}"
 
     if response.stop_reason == "refusal":
         return "The model declined to answer this question."
-    return "\n\n".join(block.text for block in response.content if block.type == "text")
+    text = "\n\n".join(block.text for block in response.content if block.type == "text")
+    if not text:
+        # e.g. max_tokens spent before any answer was written
+        return f"The model returned no answer (stop reason: {response.stop_reason})."
+    return text
 
 
 def _newest(passages: list[dict[str, Any]]) -> datetime | None:
@@ -137,6 +159,7 @@ async def ask_question(
     top, candidates = await hybrid_search(
         session, question, limit=limit or settings.retrieval_limit
     )
+    await session.commit()  # hand the connection back while the model writes its answer
 
     llm = get_llm()
     if not top:

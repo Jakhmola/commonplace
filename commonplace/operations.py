@@ -8,8 +8,10 @@ go straight to Postgres.
 
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
+import openai
 
 from commonplace.config import settings
 from commonplace.db.queries import get_job_status, upsert_publication
@@ -55,6 +57,8 @@ def resolve_manual_article(
     url: str, publications: list[PublicationEntry]
 ) -> tuple[PublicationEntry, str]:
     """(publication, canonical id) for a hand-submitted URL, or ValueError if it is unusable."""
+    if urlsplit(url).scheme not in ("http", "https"):
+        raise ValueError(f"Only http(s) URLs can be ingested: {url!r}")
     pub = assert_allowed(url, publications)
     return pub, canonical_id(pub.slug, url)
 
@@ -165,5 +169,9 @@ async def search(query: str, mode: str = "hybrid", limit: int = 5) -> list[dict[
     """Passages for a query, no LLM. `hybrid` fuses the two engines by rank;
     `sparse` and `dense` ask one engine each.
     """
-    async with get_session() as session:
-        return await _RETRIEVERS[mode].search(session, query, limit)
+    try:
+        async with get_session() as session:
+            return await _RETRIEVERS[mode].search(session, query, limit)
+    except openai.OpenAIError as exc:
+        # Only `dense` gets here: hybrid falls back to keywords on its own.
+        raise OperationError(502, f"The embedding provider failed: {exc}") from exc

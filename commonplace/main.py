@@ -53,7 +53,7 @@ async def job_status(event_id: str) -> dict[str, Any]:
 
 @app.get("/search")
 async def search(
-    q: str = Query(min_length=1),
+    q: str = Query(min_length=1, max_length=2000),
     mode: Literal["hybrid", "sparse", "dense"] = "hybrid",
     limit: int = Query(default=5, ge=1, le=25),
 ) -> dict[str, Any]:
@@ -62,7 +62,7 @@ async def search(
 
 
 class AskRequest(BaseModel):
-    question: str = Field(min_length=1)
+    question: str = Field(min_length=1, max_length=2000)
     limit: int | None = Field(default=None, ge=1, le=25)
 
 

@@ -2,7 +2,6 @@
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,41 +11,13 @@ from commonplace.db.queries import (
     count_current_passages,
     search_passages_bm25,
     store_passages,
-    upsert_article,
     upsert_publication,
 )
 from commonplace.functions.ingest import persist_article
 from commonplace.schemas.events import ArticleDiscovered
 from commonplace.sources.embedder import pack
 from commonplace.sources.parser import ParsedArticle
-
-VECTOR = [0.1] * 1536
-URL = "https://history-test.example/p/an-edited-post"
-
-
-async def _article(session: AsyncSession) -> uuid.UUID:
-    publication_id = await upsert_publication(
-        session,
-        slug="history-test",
-        name="History Test",
-        feed_url="https://history-test.example/feed",
-        homepage="https://history-test.example",
-    )
-    return await upsert_article(
-        session,
-        canonical_id="pub:history-test:an-edited-post",
-        publication_id=publication_id,
-        url=URL,
-        title="An edited post",
-        author=None,
-        published_at=datetime(2026, 11, 17, tzinfo=UTC),
-        content_hash="v1",
-        text="first version",
-    )
-
-
-def _passages(*texts: str) -> list[dict[str, Any]]:
-    return [{"chunk_index": i, "text": t, "embedding": VECTOR} for i, t in enumerate(texts)]
+from tests.integration.conftest import ARTICLE_URL, passages
 
 
 async def _all_rows(session: AsyncSession, article_id: uuid.UUID) -> int:
@@ -56,19 +27,18 @@ async def _all_rows(session: AsyncSession, article_id: uuid.UUID) -> int:
 
 async def _found(session: AsyncSession, query: str) -> list[str]:
     hits = await search_passages_bm25(session, query, 25)
-    return sorted(h["text"] for h in hits if h["url"] == URL)  # equal ranks: order is by id
+    return sorted(h["text"] for h in hits if h["url"] == ARTICLE_URL)  # equal ranks: any order
 
 
 async def test_an_edit_closes_old_passages_and_search_sees_only_the_new_ones(
-    db: AsyncSession,
+    db: AsyncSession, article_id: uuid.UUID
 ) -> None:
-    article_id = await _article(db)
     await store_passages(
-        db, article_id=article_id, passages=_passages("quokkazebra one", "quokkazebra two")
+        db, article_id=article_id, passages=passages("quokkazebra one", "quokkazebra two")
     )
     assert await _found(db, "quokkazebra") == ["quokkazebra one", "quokkazebra two"]
 
-    await store_passages(db, article_id=article_id, passages=_passages("wombatokapi rewritten"))
+    await store_passages(db, article_id=article_id, passages=passages("wombatokapi rewritten"))
 
     assert await _all_rows(db, article_id) == 3  # history is kept
     assert await count_current_passages(db, article_id) == 1
@@ -80,32 +50,29 @@ async def test_persisting_the_same_version_twice_keeps_one_current_set(db: Async
     # Inngest re-runs a step whose response was lost after its transaction committed.
     publication_id = await upsert_publication(
         db,
-        slug="history-test",
-        name="History Test",
-        feed_url="https://history-test.example/feed",
-        homepage="https://history-test.example",
+        slug="integration-test",
+        name="Integration Test",
+        feed_url="https://integration-test.example/feed",
+        homepage="https://integration-test.example",
     )
+    when = datetime(2026, 11, 17, tzinfo=UTC)
     payload = ArticleDiscovered(
-        canonical_id="pub:history-test:persisted-twice",
+        canonical_id="pub:integration-test:persisted-twice",
         publication_id=publication_id,
-        url=URL,
+        url=ARTICLE_URL,
         title="Persisted twice",
-        published_at=datetime(2026, 11, 17, tzinfo=UTC),
+        published_at=when,
         via="manual",
     )
     article = ParsedArticle(
-        title="Persisted twice",
-        author=None,
-        published_at=datetime(2026, 11, 17, tzinfo=UTC),
-        text="one two",
-        content_hash="same-hash",
+        title="Persisted twice", author=None, published_at=when, text="one two", content_hash="h"
     )
-    chunks, vectors = ["one", "two"], [pack(VECTOR), pack(VECTOR)]
+    chunks, vectors = ["one", "two"], [pack([0.1] * 1536)] * 2
 
-    first = await persist_article(db, payload, URL, article, chunks, vectors)
-    second = await persist_article(db, payload, URL, article, chunks, vectors)
+    first = await persist_article(db, payload, ARTICLE_URL, article, chunks, vectors)
+    second = await persist_article(db, payload, ARTICLE_URL, article, chunks, vectors)
 
     assert first == second
-    article_id = uuid.UUID(first["article_id"])
-    assert await _all_rows(db, article_id) == 2
-    assert await count_current_passages(db, article_id) == 2
+    stored = uuid.UUID(first["article_id"])
+    assert await _all_rows(db, stored) == 2
+    assert await count_current_passages(db, stored) == 2

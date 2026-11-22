@@ -7,7 +7,7 @@ using only each passage's position in each list, so two scores that live on
 different scales are never added together.
 """
 
-import asyncio
+import logging
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from commonplace.config import settings
 from commonplace.db.queries import search_passages_bm25, search_passages_dense
 from commonplace.sources.embedder import embed_texts
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,14 +78,22 @@ async def hybrid_search(
     Callers that only answer need the first; a snapshot keeps the second.
     """
     per_engine = max(limit * fetch_multiplier, 15)
-    # One session cannot run two queries at once. The slow part is the network
-    # call that embeds the question, so that overlaps the full-text query and
-    # the vector query runs when the embedding is back.
-    sparse_results, embedded = await asyncio.gather(
-        search_passages_bm25(session, query, per_engine), embed_texts([query])
+
+    # The question is embedded before the session is touched, so no connection
+    # is held during the network call. If the embedding provider is down the
+    # search degrades to keywords only instead of failing.
+    query_embedding: list[float] | None = None
+    try:
+        (query_embedding,) = (await embed_texts([query]))["embeddings"]
+    except Exception:
+        logger.exception("Could not embed the query; falling back to keyword search")
+
+    sparse_results = await search_passages_bm25(session, query, per_engine)
+    dense_results = (
+        await search_passages_dense(session, query_embedding, per_engine)
+        if query_embedding is not None
+        else []
     )
-    (query_embedding,) = embedded["embeddings"]
-    dense_results = await search_passages_dense(session, query_embedding, per_engine)
 
     fused = [asdict(c) for c in compute_rrf(sparse_results, dense_results, k or settings.rrf_k)]
     return fused[:limit], fused

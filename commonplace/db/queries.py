@@ -4,8 +4,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Row, Select, func, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import Row, Select, Text, cast, func, select, update
+from sqlalchemy.dialects.postgresql import TSQUERY, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from commonplace.db.models import Article, Cost, Cursor, Job, Passage, Publication, Snapshot
@@ -293,13 +293,29 @@ def _hit(row: Row[Any]) -> dict[str, Any]:
 async def search_passages_bm25(
     session: AsyncSession, query: str, limit: int
 ) -> list[dict[str, Any]]:
-    """Full-text search over the generated `tsv` column (GIN index)."""
-    tsquery = func.websearch_to_tsquery("english", query)
-    rank = func.ts_rank(Passage.tsv, tsquery)
+    """Full-text search over the generated `tsv` column (GIN index).
+
+    A passage matches when it contains any of the query's terms; passages that
+    contain all of them come first, then by rank. Requiring every term would
+    make a question-shaped query ("how does X compare to Y for agents?") match
+    almost nothing. A query with double quotes is taken literally instead:
+    phrases must match exactly and every term is required.
+    """
+    all_terms = (
+        func.websearch_to_tsquery("english", query)
+        if '"' in query
+        else func.plainto_tsquery("english", query)
+    )
+    # plainto_tsquery normalises the words, drops stop words and joins them with
+    # `&`; swapping the operator turns "all of these" into "any of these".
+    any_term = (
+        all_terms if '"' in query else cast(func.replace(cast(all_terms, Text), "&", "|"), TSQUERY)
+    )
+    rank = func.ts_rank(Passage.tsv, any_term)
     stmt = (
         _passage_hits(rank)
-        .where(Passage.tsv.op("@@")(tsquery))
-        .order_by(rank.desc(), Passage.id)
+        .where(Passage.tsv.op("@@")(any_term))
+        .order_by(Passage.tsv.op("@@")(all_terms).desc(), rank.desc(), Passage.id)
         .limit(limit)
     )
     return [_hit(row) for row in (await session.execute(stmt)).all()]

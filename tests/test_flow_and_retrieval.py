@@ -7,8 +7,10 @@ from typing import Any
 
 import anthropic
 import httpx2
+import openai
 import pytest
 
+from commonplace import operations
 from commonplace.functions import FUNCTIONS
 from commonplace.functions.ask import cited, format_context, synthesize
 from commonplace.functions.backfill import candidates, feed_pointers
@@ -218,3 +220,59 @@ def test_backfill_skips_entries_it_cannot_identify_and_duplicate_ids() -> None:
     found = candidates(pointers, AHEAD_OF_AI, uuid.uuid4())
     assert [c.canonical_id for c in found] == ["pub:ahead-of-ai:a-post", "pub:ahead-of-ai:b-post"]
     assert found[0].url.endswith("/p/a-post") and found[0].via == "backfill"
+
+
+# --- answers: found in review ---
+
+
+def test_citations_in_lists_and_ranges_are_recognised() -> None:
+    assert [c["citation_idx"] for c in cited("Both agree [1, 2].", PASSAGES)] == [1, 2]
+    assert [c["citation_idx"] for c in cited("All three say so [1-3].", PASSAGES)] == [1, 2, 3]
+    assert [c["citation_idx"] for c in cited("Stacked [2][3] and spaced [ 1 ].", PASSAGES)] == [
+        1,
+        2,
+        3,
+    ]
+    assert cited("Passage [10] does not exist, and 1 is not cited.", PASSAGES) == []
+
+
+class _LLM:
+    """An Anthropic client stand-in whose one call either raises or returns `response`."""
+
+    def __init__(self, response: Any = None, error: Exception | None = None) -> None:
+        async def create(**_: Any) -> Any:
+            if error is not None:
+                raise error
+            return response
+
+        self.beta = SimpleNamespace(messages=SimpleNamespace(create=create))
+
+
+async def test_any_exception_from_the_llm_becomes_the_answer_text() -> None:
+    # The SDK also raises plain errors, e.g. ValueError when max_tokens needs streaming.
+    llm: Any = _LLM(error=ValueError("Streaming is required"))
+    answer = await synthesize(llm, "What is throttling?", PASSAGES)
+    assert answer == "LLM synthesis failed (ValueError): Streaming is required"
+
+
+async def test_a_response_without_text_is_reported_not_returned_empty() -> None:
+    llm: Any = _LLM(response=SimpleNamespace(stop_reason="max_tokens", content=[]))
+    answer = await synthesize(llm, "What is throttling?", PASSAGES)
+    assert "max_tokens" in answer and cited(answer, PASSAGES) == []
+
+
+def test_a_manual_url_must_be_http() -> None:
+    with pytest.raises(ValueError, match="http"):
+        resolve_manual_article("ftp://magazine.sebastianraschka.com/p/a-post", [AHEAD_OF_AI])
+
+
+async def test_search_reports_an_embedding_outage_as_bad_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def search(*_: Any) -> list[dict[str, Any]]:
+        raise openai.OpenAIError("provider is down")
+
+    monkeypatch.setitem(operations._RETRIEVERS, "dense", SimpleNamespace(search=search))
+    with pytest.raises(operations.OperationError) as raised:
+        await operations.search("anything", mode="dense")
+    assert raised.value.status == 502
