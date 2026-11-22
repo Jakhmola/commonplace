@@ -6,8 +6,16 @@ No Docker or keys needed.
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from commonplace.evals.deterministic import is_abstain_answer, run_deterministic_checks
+from commonplace.evals.judges import (
+    BinaryVerdict,
+    disagreement_judge,
+    faithfulness_judge,
+    format_judge_input,
+    requires_disagreement_check,
+)
 from commonplace.evals.metrics import compute_tpr_tnr, load_taxonomy, mrr, recall_at_k
 
 # --- the taxonomy: every failure mode has a name and someone responsible for it ---
@@ -165,3 +173,59 @@ def test_recall_and_mrr_at_k() -> None:
     assert mrr(retrieved, ["c", "a"], k=5) == 1.0  # the first relevant result is at rank 1
     assert mrr(retrieved, ["c"], k=5) == pytest.approx(1 / 3)
     assert mrr(retrieved, ["f"], k=5) == 0.0
+
+
+# --- level 2: narrow binary judges ---
+
+
+def test_a_verdict_puts_the_critique_before_the_verdict() -> None:
+    # The model fills fields in schema order: it has to reason before it decides.
+    assert list(BinaryVerdict.model_json_schema()["properties"]) == [
+        "critique",
+        "verdict",
+        "failure_code",
+    ]
+    assert faithfulness_judge.output_schema is BinaryVerdict
+    assert disagreement_judge.output_schema is BinaryVerdict
+    assert faithfulness_judge.system_prompt != disagreement_judge.system_prompt
+
+
+def test_verdicts_are_binary() -> None:
+    ok = BinaryVerdict(critique="Every statement is supported by [1].", verdict="PASS")
+    assert ok.failure_code == "NONE"
+    for not_binary in ("MAYBE", "4/5", "pass"):
+        with pytest.raises(ValidationError):
+            BinaryVerdict(critique="Some reasoning here.", verdict=not_binary)  # type: ignore[arg-type]
+
+
+def test_judge_input_numbers_passages_and_shows_claim_types() -> None:
+    retrieved = [
+        _passage(1, claim_text="Retries add 40 ms", claim_type="measurement"),
+        _passage(2, author=None),
+        _passage(5),  # a candidate that never reached the prompt
+    ]
+    text = format_judge_input(
+        question="How much do retries cost?", retrieved=retrieved, answer_text="About 40 ms [1]."
+    )
+    assert text.startswith("Question: How much do retries cost?")
+    assert "[1] Author: Jane Writer | Title: A post | Claim type: measurement" in text
+    assert "Claim: Retries add 40 ms" in text and "Text: text of passage 1" in text
+    assert "[2] Author: Unknown | Title: A post | Claim type: none" in text
+    assert "text of passage 5" not in text
+    assert text.endswith("Answer:\nAbout 40 ms [1].")
+
+
+def test_judge_input_says_when_nothing_was_retrieved() -> None:
+    text = format_judge_input(question="Anything?", retrieved=[], answer_text="No idea.")
+    assert "(no passages were retrieved)" in text
+
+
+def test_disagreement_is_only_judged_when_two_authors_were_in_the_prompt() -> None:
+    same_author = [_passage(1), _passage(2)]
+    assert requires_disagreement_check(same_author) is False
+    two_authors = [_passage(1), _passage(2, author="Sam Critic")]
+    assert requires_disagreement_check(two_authors) is True
+    # a second author who was only a candidate, never shown to the model, does not count
+    only_candidate = [_passage(1), _passage(6, author="Sam Critic")]
+    assert requires_disagreement_check(only_candidate) is False
+    assert requires_disagreement_check([_passage(1), _passage(2, author=None)]) is False

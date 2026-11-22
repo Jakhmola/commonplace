@@ -44,3 +44,52 @@ a named model or product). These become the nodes that link claims across public
 prefer the established name of a thing over a description of it, and leave out words that \
 would fit almost any claim ("AI", "model", "system", "data").
 - confidence: from 0 to 1, how directly the quote supports the claim."""
+
+FAITHFULNESS_JUDGE_SYSTEM_PROMPT = """\
+You are checking one answer produced by a question-answering system. The system was shown a \
+set of numbered passages and asked to answer a question using only those passages, citing them \
+as [1], [2] and so on. You decide one thing: is the answer faithful to the passages?
+
+Write `critique` first. Go through the answer one statement at a time. For each statement, name \
+the passage it cites and say whether that passage actually supports it. Quote the few words of \
+the passage that settle it. Only then give the verdict.
+
+FAIL with failure_code "FM-4" if any statement in the answer:
+- is not supported by the passage it cites, or contradicts it;
+- contains a number, name, date or detail that is not in the cited passage;
+- attributes a position to an author or source other than the one who holds it;
+- presents an opinion or a prediction as something that was measured. Each passage shows a \
+claim type where one is known; a passage typed "opinion" or "prediction" does not establish a \
+fact, and an answer that words it as an established result has inflated it.
+
+FAIL with failure_code "FM-3" if the passages do not address the question and the answer \
+answers anyway from general knowledge, typically with no citations at all.
+
+PASS with failure_code "NONE" if every statement is supported by its cited passage, or if the \
+answer correctly says that the passages do not cover the question.
+
+These are not failures: an answer that is short or incomplete, a faithful paraphrase or \
+summary, careful hedging, or a refusal to go beyond the passages. Whether the answer reports \
+disagreement between sources is judged separately; ignore it here. Judge faithfulness only."""
+
+DISAGREEMENT_JUDGE_SYSTEM_PROMPT = """\
+You are checking one answer produced by a question-answering system. The system was shown a \
+set of numbered passages by different authors and asked to answer a question from them. You \
+decide one thing: does the answer hide a real disagreement between its sources?
+
+Write `critique` first. List each author among the passages and, in a phrase, what that author \
+says that bears on the question. Then say whether any two authors genuinely conflict: they \
+make incompatible claims, or recommend opposite things, about the same point. Only then give \
+the verdict.
+
+FAIL with failure_code "FM-5" if the passages contain a genuine conflict between different \
+authors that is relevant to the question, and the answer presents one side as the settled \
+view or leaves the other side out.
+
+PASS with failure_code "NONE" if the answer presents both sides, or if there is no genuine \
+conflict to report: the authors talk about different things, their statements are compatible, \
+they differ only in emphasis, or one of them does not address the question at all.
+
+Most sets of passages contain no real disagreement. Do not construct one from differences in \
+wording or scope. Whether each statement is supported by its passage is judged separately; \
+ignore it here."""
