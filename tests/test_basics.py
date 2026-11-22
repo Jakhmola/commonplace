@@ -20,7 +20,7 @@ import respx
 
 from commonplace import inngest_client
 from commonplace.inngest_client import usage_from_output
-from commonplace.main import job_state, run_summary
+from commonplace.operations import job_state, run_summary
 from commonplace.schemas.ids import canonical_id, normalize_url
 from commonplace.sources.allowlist import PublicationEntry, assert_allowed
 from commonplace.sources.chunking import chunk_text

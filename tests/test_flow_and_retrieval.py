@@ -13,7 +13,7 @@ from commonplace.functions import FUNCTIONS
 from commonplace.functions.ask import cited, format_context, synthesize
 from commonplace.functions.backfill import candidates, feed_pointers
 from commonplace.functions.ingest import ingest_article
-from commonplace.main import resolve_manual_article
+from commonplace.operations import resolve_manual_article
 from commonplace.retrieval.hybrid import compute_rrf
 from commonplace.schemas.ids import canonical_id, snapshot_id
 from commonplace.sources.allowlist import PublicationEntry, assert_allowed
