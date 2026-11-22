@@ -17,6 +17,9 @@ from commonplace.evals.judges import (
     requires_disagreement_check,
 )
 from commonplace.evals.metrics import compute_tpr_tnr, load_taxonomy, mrr, recall_at_k
+from commonplace.functions import FUNCTIONS
+from commonplace.functions.evals import composite_score, evaluate_answer
+from commonplace.schemas.events import ANSWER_EVALUATED, AnswerEvaluated
 
 # --- the taxonomy: every failure mode has a name and someone responsible for it ---
 
@@ -229,3 +232,42 @@ def test_disagreement_is_only_judged_when_two_authors_were_in_the_prompt() -> No
     only_candidate = [_passage(1), _passage(6, author="Sam Critic")]
     assert requires_disagreement_check(only_candidate) is False
     assert requires_disagreement_check([_passage(1), _passage(2, author=None)]) is False
+
+
+# --- scoring answers as they are produced ---
+
+
+def test_composite_score_is_zero_half_or_one() -> None:
+    assert composite_score(True, "PASS", "PASS") == 1.0
+    assert composite_score(True, "PASS", "NOT_APPLICABLE") == 1.0
+    assert composite_score(True, "PASS", "FAIL") == 0.5  # faithful, but one-sided
+    assert composite_score(True, "FAIL", "PASS") == 0.0
+    assert composite_score(False, "PASS", "PASS") == 0.0  # a structural failure outranks the judges
+
+
+def test_a_skipped_judge_does_not_count_as_a_pass_or_a_fail() -> None:
+    # No API key: only the checks in code ran. Their result stands on its own.
+    assert composite_score(True, "SKIPPED", "SKIPPED") == 1.0
+    assert composite_score(False, "SKIPPED", "SKIPPED") == 0.0
+
+
+def test_answers_are_evaluated_as_they_are_produced() -> None:
+    config = evaluate_answer.get_config("http://localhost:8000").main
+    (trigger,) = config.triggers
+    assert getattr(trigger, "event", None) == "cp/answer.produced"
+    (limit,) = config.concurrency or []
+    assert (limit.key, limit.limit) == (None, 2)
+    assert evaluate_answer in FUNCTIONS
+
+
+def test_answer_evaluated_reports_the_verdicts() -> None:
+    evaluated = AnswerEvaluated(
+        snapshot_id="snap_1",
+        composite_score=0.5,
+        deterministic_passed=True,
+        faithfulness_verdict="PASS",
+        disagreement_verdict="FAIL",
+        failure_codes=["FM-5"],
+    )
+    assert ANSWER_EVALUATED == "cp/answer.evaluated"
+    assert evaluated.model_dump(mode="json")["failure_codes"] == ["FM-5"]

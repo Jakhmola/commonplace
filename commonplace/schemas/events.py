@@ -18,6 +18,8 @@ ARTICLE_INGESTED = "cp/article.ingested"
 ARTICLE_UPDATED = "cp/article.updated"
 CLAIMS_EXTRACTED = "cp/claims.extracted"
 ANSWER_PRODUCED = "cp/answer.produced"
+ANSWER_EVALUATED = "cp/answer.evaluated"
+EVAL_RUN_REQUESTED = "cp/eval.run"
 
 DiscoverySource = Literal["rss", "backfill", "manual", "poll"]
 
@@ -81,6 +83,23 @@ class AnswerProduced(BaseModel):
 
     snapshot_id: str
     retriever_variant: str
+
+
+class AnswerEvaluated(BaseModel):
+    """Evaluator -> whoever listens. How one answer scored."""
+
+    snapshot_id: str
+    composite_score: float
+    deterministic_passed: bool
+    faithfulness_verdict: str
+    disagreement_verdict: str
+    failure_codes: list[str]
+
+
+class EvalRunRequested(BaseModel):
+    """Anyone -> benchmark suite. Compare the retrieval variants on the golden questions."""
+
+    suite_name: str = "golden_v1"
 
 
 def event(name: str, payload: BaseModel) -> inngest.Event:
