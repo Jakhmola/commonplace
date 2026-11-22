@@ -68,6 +68,7 @@ TOPIC_ALIASES: dict[str, tuple[str, str]] = {
     "open-source-model": ("open-model", "Open Model"),
     "open-weight-model": ("open-model", "Open Model"),
     "open-model": ("open-model", "Open Model"),
+    "openai": ("openai", "OpenAI"),
 }
 
 # Too generic to connect anything: as topics these would become hubs that link

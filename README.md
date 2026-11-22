@@ -11,7 +11,8 @@ or a provider outage resumes where it stopped instead of starting over (and payi
 - **FastAPI** for the HTTP API
 - **Inngest** for durable, retryable, rate-limited pipelines
 - **Postgres + pgvector** for text, embeddings and full-text search in one place
-- **Claude** for answers grounded in the retrieved passages
+- **Claude** for answers grounded in the retrieved passages, and for extracting claims
+- **Memgraph** for the claim graph: authors, claims and the topics that connect them
 - **uv**, **ruff**, **mypy**, **pytest**
 
 ## Getting started
@@ -30,6 +31,7 @@ make check              # lint, types, tests
 | API docs | http://localhost:8000/docs |
 | Inngest dev server | http://localhost:8288 |
 | Adminer (Postgres) | http://localhost:8081 |
+| Memgraph Lab (the claim graph) | http://localhost:3000 |
 
 ## Using it
 
@@ -55,6 +57,12 @@ curl -X POST localhost:8000/ask -H 'content-type: application/json' \
 uv run python scripts/replay_backfill.py --verify
 uv run python scripts/replay_backfill.py --all
 
+# trace a citation (a claim_id or passage_id) back to its exact source text
+curl localhost:8000/sources/<id>
+
+# extract claims for articles that have none yet (new articles do this on their own)
+uv run python scripts/enrich_backlog.py
+
 # check the feeds for new articles now (they are also polled every five minutes)
 curl -X POST localhost:8288/e/dev -H 'content-type: application/json' \
   -d '{"name": "cp/feed.poll", "data": {}}'
@@ -66,8 +74,8 @@ Feeds must be listed in [`publications.yaml`](publications.yaml). `/ask` needs
 ## Using it from Claude Code (MCP)
 
 `cp-mcp` serves the knowledge base as MCP tools over stdio: `cp_search`, `cp_ask`,
-`cp_list_publications`, `cp_job_status`, `cp_health`, `cp_add_publication`,
-`cp_backfill` and `cp_sync`. [`.mcp.json`](.mcp.json) registers it for Claude Code
+`cp_sources`, `cp_list_publications`, `cp_job_status`, `cp_health`,
+`cp_add_publication`, `cp_backfill` and `cp_sync`. [`.mcp.json`](.mcp.json) registers it for Claude Code
 when Claude Code is started in this directory (it asks once before enabling it).
 From anywhere else:
 
@@ -81,7 +89,8 @@ The stack (`make start`) has to be running.
 
 `make test` runs everything. Unit tests need nothing. The tests in
 `tests/integration/` use the real Postgres from `make up`, each inside a
-transaction that is rolled back, and are skipped when it is not running.
+transaction that is rolled back, and are skipped when it is not running. The graph
+tests need Memgraph and clean up the few nodes they create.
 
 ## Progress
 

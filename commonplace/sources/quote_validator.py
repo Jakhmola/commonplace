@@ -20,18 +20,16 @@ MIN_QUOTE_SPAN_CHARS = 15
 # difference of typography, not of words, so both sides are folded before
 # comparing. Each replacement is one character for one, which keeps positions
 # in the folded text aligned with the original.
-_TYPOGRAPHY = str.maketrans(
-    {
-        "‘": "'",
-        "’": "'",
-        "“": '"',
-        "”": '"',
-        "–": "-",
-        "—": "-",
-        "−": "-",
-        " ": " ",
-    }
-)
+_TYPOGRAPHY = {
+    0x2018: "'",  # left single quote
+    0x2019: "'",  # right single quote, apostrophe
+    0x201C: '"',  # left double quote
+    0x201D: '"',  # right double quote
+    0x2013: "-",  # en dash
+    0x2014: "-",  # em dash
+    0x2212: "-",  # minus sign
+    0x00A0: " ",  # no-break space
+}
 
 
 def _collapse(text: str) -> str:
