@@ -6,8 +6,13 @@ export
 COMPOSE := docker compose -f infra/docker-compose.yml
 APP_PORT ?= 8000
 
+# INNGEST_DEV=0 means Inngest Cloud: the local dev server is not started.
+ifneq ($(filter $(INNGEST_DEV),0 false False),)
+SERVICES := postgres adminer memgraph memgraph-lab
+endif
+
 up:
-	$(COMPOSE) up -d --wait
+	$(COMPOSE) up -d --wait $(SERVICES)
 
 start: up
 	@if [ -f alembic.ini ]; then uv run alembic upgrade head; fi

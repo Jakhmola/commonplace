@@ -11,6 +11,13 @@ from commonplace.db.session import get_session
 from commonplace.graph.client import check_memgraph_health, count_graph_entities
 
 
+def inngest_reachable(status_code: int, *, dev: bool) -> bool:
+    """The dev server answers its root with 200. The cloud API has no page
+    there, so any response at all shows that it can be reached.
+    """
+    return status_code < 400 or not dev
+
+
 async def check_health() -> dict[str, Any]:
     """Never raises: a health check has to say which dependency is down."""
     checks: dict[str, str] = {}
@@ -28,8 +35,9 @@ async def check_health() -> dict[str, Any]:
 
     try:
         async with httpx.AsyncClient(timeout=3.0) as http:
-            (await http.get(settings.inngest_base_url)).raise_for_status()
-        checks["inngest"] = "ok"
+            status = (await http.get(settings.inngest_base_url)).status_code
+        reachable = inngest_reachable(status, dev=settings.inngest_dev)
+        checks["inngest"] = "ok" if reachable else f"error: HTTP {status}"
     except httpx.HTTPError as exc:
         checks["inngest"] = f"error: {exc.__class__.__name__}"
 

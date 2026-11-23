@@ -1,13 +1,16 @@
 """HTTP API: a thin layer over `operations.py`, plus the Inngest function endpoint."""
 
+import secrets
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 import inngest.fast_api
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from commonplace import operations
+from commonplace.config import settings
 from commonplace.functions import FUNCTIONS
 from commonplace.health import check_health
 from commonplace.inngest_client import client
@@ -15,6 +18,21 @@ from commonplace.schemas.events import PublicationAdded
 
 app = FastAPI(title="commonplace")
 inngest.fast_api.serve(app, client, FUNCTIONS)
+
+
+@app.middleware("http")
+async def require_token(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """With API_TOKEN set, every route needs it, except the health probe and the
+    Inngest endpoint (whose requests Inngest signs and the SDK verifies).
+    """
+    path = request.url.path
+    if settings.api_token and path != "/health" and not path.startswith("/api/inngest"):
+        supplied = request.headers.get("authorization", "").encode()
+        if not secrets.compare_digest(supplied, f"Bearer {settings.api_token}".encode()):
+            return JSONResponse(status_code=401, content={"detail": "A bearer token is required"})
+    return await call_next(request)
 
 
 @app.exception_handler(operations.OperationError)

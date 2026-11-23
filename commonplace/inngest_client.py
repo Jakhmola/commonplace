@@ -66,6 +66,10 @@ client = inngest.Inngest(
     is_production=not settings.inngest_dev,
     api_base_url=settings.inngest_base_url if settings.inngest_dev else None,
     event_api_base_url=settings.inngest_base_url if settings.inngest_dev else None,
+    # Inngest Cloud: the event key authorises sending, the signing key verifies
+    # that requests to /api/inngest really come from Inngest.
+    event_key=settings.inngest_event_key or None,
+    signing_key=settings.inngest_signing_key or None,
     logger=logging.getLogger("uvicorn"),
     middleware=[CostCaptureMiddleware],
 )

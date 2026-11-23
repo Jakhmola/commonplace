@@ -4,14 +4,17 @@ No Docker or keys needed.
 """
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import inngest
 import pytest
+import yaml
+from fastapi.testclient import TestClient
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import ValidationError
 
-from commonplace import operations
+from commonplace import main, operations
 from commonplace.agents import core as agents_core
 from commonplace.agents.roles.researcher import (
     CoverageReflection,
@@ -26,6 +29,7 @@ from commonplace.agents.roles.researcher import (
     stop_reason_after_hop,
 )
 from commonplace.citations import format_context
+from commonplace.config import Settings
 from commonplace.functions import FUNCTIONS, research
 from commonplace.functions.digest import (
     citations_in_bounds,
@@ -38,6 +42,7 @@ from commonplace.functions.digest import (
     shared_topics,
 )
 from commonplace.functions.research import run_research_agent
+from commonplace.health import inngest_reachable
 from commonplace.main import DigestRequest, ResearchRequest
 from commonplace.mcp import tools
 from commonplace.mcp.server import mcp
@@ -522,3 +527,73 @@ async def test_the_server_registers_thirteen_tools() -> None:
     names = {tool.name for tool in await mcp.list_tools()}
     assert len(names) == 13
     assert {"cp_research", "cp_research_result", "cp_weekly_digest"} <= names
+
+
+# --- production packaging ---
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def test_production_files_require_their_secrets() -> None:
+    compose = yaml.safe_load((REPO / "infra/docker-compose.prod.yml").read_text())
+    services = compose["services"]
+    assert set(services) == {"postgres", "memgraph", "app"}
+    for name, service in services.items():
+        assert service["restart"] == "always" and "healthcheck" in service, name
+
+    app_env = services["app"]["environment"]
+    # `${VAR:?message}`: compose refuses to start when the variable is unset or empty
+    for secret in ("INNGEST_EVENT_KEY", "INNGEST_SIGNING_KEY", "OPENAI_API_KEY", "API_TOKEN"):
+        assert app_env[secret].startswith(f"${{{secret}:?"), secret
+    assert services["postgres"]["environment"]["POSTGRES_PASSWORD"].startswith(
+        "${POSTGRES_PASSWORD:?"
+    )
+    assert app_env["INNGEST_DEV"] == "0"
+    # the databases are reachable from the app only, not from outside
+    assert "ports" not in services["postgres"] and "ports" not in services["memgraph"]
+
+    dockerfile = (REPO / "Dockerfile").read_text()
+    assert "uv sync --frozen --no-dev" in dockerfile
+    assert "USER " in dockerfile  # the app does not run as root
+    copied = [line for line in dockerfile.splitlines() if line.startswith("COPY")]
+    assert copied and not any(".env" in line or " . " in line for line in copied)
+    ignored = (REPO / ".dockerignore").read_text().split()
+    assert {".env", ".git", ".venv"} <= set(ignored)
+
+
+def test_cloud_mode_points_at_inngest_cloud() -> None:
+    local = "http://localhost:8288"
+    assert Settings(inngest_dev=True, inngest_base_url=local).inngest_base_url == local
+    # INNGEST_DEV=0 with the local default left in place: the cloud API is meant
+    assert (
+        Settings(inngest_dev=False, inngest_base_url=local).inngest_base_url
+        == "https://api.inngest.com"
+    )
+    own = "https://inngest.internal.example"
+    assert Settings(inngest_dev=False, inngest_base_url=own).inngest_base_url == own
+
+
+def test_inngest_counts_as_reachable_in_cloud_mode_on_any_response() -> None:
+    # The dev server answers its root with 200. The cloud API has no page there.
+    assert inngest_reachable(200, dev=True) and not inngest_reachable(404, dev=True)
+    assert inngest_reachable(404, dev=False) and inngest_reachable(401, dev=False)
+
+
+def test_with_a_token_configured_the_api_requires_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def healthy() -> dict[str, Any]:
+        return {"status": "ok"}
+
+    monkeypatch.setattr(main, "check_health", healthy)
+    api = TestClient(main.app)
+
+    monkeypatch.setattr(main.settings, "api_token", "")
+    assert api.get("/openapi.json").status_code == 200  # local development: open
+
+    monkeypatch.setattr(main.settings, "api_token", "s3cret")
+    assert api.get("/openapi.json").status_code == 401
+    assert api.post("/research", json={"question": "q"}).status_code == 401
+    assert api.get("/openapi.json", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert api.get("/openapi.json", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+    # a health probe has no token, and Inngest signs its own requests
+    assert api.get("/health").status_code == 200
+    assert api.get("/api/inngest").status_code != 401

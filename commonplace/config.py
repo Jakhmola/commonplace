@@ -1,5 +1,6 @@
-from typing import Literal
+from typing import Literal, Self
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,10 +11,15 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     anthropic_api_key: str = ""
 
+    # True: the local Inngest dev server. False: Inngest Cloud, which needs both keys.
     inngest_dev: bool = True
     inngest_base_url: str = "http://localhost:8288"
+    inngest_event_key: str = ""
     inngest_signing_key: str = ""
     app_port: int = 8000
+    # When set, every route except /health and /api/inngest requires
+    # "Authorization: Bearer <token>". Empty (local development): the API is open.
+    api_token: str = ""
 
     user_agent: str = "commonplace/0.1"
     request_timeout_s: float = 20.0
@@ -96,6 +102,13 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 96
     # text-embedding-3-small list price; embeddings have no output tokens.
     embedding_price_per_million_tokens: float = 0.02
+
+    @model_validator(mode="after")
+    def _cloud_mode_uses_the_cloud_api(self) -> Self:
+        # INNGEST_DEV=0 with the local address left in place means Inngest Cloud.
+        if not self.inngest_dev and "localhost:8288" in self.inngest_base_url:
+            self.inngest_base_url = "https://api.inngest.com"
+        return self
 
 
 settings = Settings()

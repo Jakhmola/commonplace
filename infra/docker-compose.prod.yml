@@ -1,0 +1,64 @@
+# Production: the app in a container next to Postgres and Memgraph, with
+# Inngest Cloud as the workflow engine (no dev server).
+#
+#   docker compose -f infra/docker-compose.prod.yml --env-file .env up -d --build
+#
+# Then sync https://<your-host>/api/inngest in the Inngest Cloud dashboard.
+# Compose refuses to start while any `${VAR:?...}` below is unset.
+name: commonplace-prod
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg16
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-commonplace}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-commonplace}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-commonplace} -d ${POSTGRES_DB:-commonplace}"]
+      interval: 5s
+      retries: 20
+
+  memgraph:
+    image: memgraph/memgraph:3.14.0
+    restart: always
+    volumes: [memgraph_data:/var/lib/memgraph]
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole || exit 1"]
+      interval: 5s
+      retries: 20
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      # The password goes into a URL: keep it to letters and digits, or percent-encode it.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-commonplace}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-commonplace}
+      MEMGRAPH_URI: bolt://memgraph:7687
+      INNGEST_DEV: "0"
+      INNGEST_EVENT_KEY: ${INNGEST_EVENT_KEY:?Set INNGEST_EVENT_KEY (Inngest Cloud, Manage, Event Keys)}
+      INNGEST_SIGNING_KEY: ${INNGEST_SIGNING_KEY:?Set INNGEST_SIGNING_KEY (Inngest Cloud, Manage, Signing Key)}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY (embeddings)}
+      # Without it: no answers, claims, judges or reports, only search.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Every route except /health and /api/inngest requires "Authorization: Bearer <token>".
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN to a long random string}
+    ports: ["${APP_PORT:-8000}:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      memgraph:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  pgdata:
+  memgraph_data:
