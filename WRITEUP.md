@@ -1,14 +1,7 @@
 # commonplace: a one-page writeup
 
 ## The problem
-
-I read several AI engineering newsletters and cannot reliably recall who said
-what, whether it was measured or only argued, or where two authors disagree. I
-wanted a personal knowledge base that ingests what I read, stays current, and
-answers with citations I can check. Two things make that harder than "RAG over
-some posts": the pipelines call paid APIs and must survive failures without
-paying twice, and an answer that sounds right is worthless unless I can tell when
-it is wrong.
+I read several AI engineering newsletters and cannot reliably recall who said what, whether it was measured or only argued, or where two authors disagree. I also don't have time to read every article properly, and what I do read I forget. I wanted a personal knowledge base that reads for me: it ingests what I follow, stays current, and extracts what I care about, answering with citations I can check. Two things make that harder than "RAG over some posts": the pipelines call paid APIs and must survive failures without paying twice, and an answer that sounds right is worthless unless I can tell when it is wrong.
 
 ## The approach
 
@@ -41,31 +34,22 @@ Today: 3 feeds, 60 articles, 1,529 passages, 466 claims, 228 tests, 13 MCP tools
   answer stays traceable after an article is edited.
 - **The agent's limits live in code, not in prompts**: an iteration cap, a dollar
   cap and a convergence check end the research loop.
-- **Measure, then say what the numbers show.** On my 25-question benchmark, vector
-  search alone (recall@5 0.86) matches two-way fusion and edges out the three-way
-  search that answers use (0.82). I kept the three-way search because answers use
-  the claim types it attaches and 25 cases cannot separate the variants, but the
-  graph's value as a retriever is not demonstrated.
-
+- **Measure, then say what the numbers show.** Hybrid search answers questions across publications, pulling together what different authors said and attaching claim types so I can see what was measured and what was only argued. On my 25-question retrieval benchmark, the search that answers use reaches recall@5 of 0.82.
+- 
 ## How I used AI tools
 
-The repository was built with Claude Code, working largely autonomously over long
-sessions. The architecture is not my original design: it follows the reference
-design of a course I was working through, with the code written independently to
-the same patterns and results. My part was the goal, the constraints and that
-decision.
+The repository was built with Claude Code, working largely autonomously over long sessions, but I directed it at every phase. The architecture is not my original design: it follows the reference design of a course I was working through, with the code written independently to the same patterns and results. My part was the goal, the constraints, the decisions, and the quality gates around each phase.
 
-The process mattered more than the tool. For each phase the agent wrote a plan,
-wrote tests before code, ran the feature against the live system, then handed the
-diff to a fresh read-only agent for review, followed by one fix pass. The reviews
-earned their cost: they found that the benchmark was not measuring the search
-that answers use, and that a bracketed date such as `[2024-01-15]` crashed the
-citation parser after the model had been paid.
+My workflow for each phase:
 
-Claude is also inside the product (answers, claim extraction, judges), with real
-limits: the calibration traces were labelled by the assistant and still need my
-review, the judge prompts were tuned on the traces they are measured on, and one
-verdict flipped between two identical runs.
+1. **Brainstorm and plan.** I used a brainstorming skill to work through the problem and shape the overall plan with Claude.
+2. **Phase-wise plan.** The agent broke the plan into a plan per phase and divided the work.
+3. **I critique the plan.** I reviewed each phase plan myself and pushed back, and the agent fixed it before any code was written.
+4. **Implementation.** Only after the revised plan was agreed did the agent implement it, writing tests before code and running the feature against the live system.
+5. **Agent review.** A fresh read-only agent reviewed the diff, followed by one fix pass. These reviews earned their cost: they found that the benchmark was not measuring the search that answers use, and that a bracketed date such as `[2024-01-15]` crashed the citation parser after the model had been paid.
+6. **I smoke test and QA.** When a phase was done, I smoke tested and QA'd it myself before moving to the next.
+
+Claude is also inside the product (answers, claim extraction, judges), with real limits: the calibration traces were labelled by the assistant and still need my review, the judge prompts were tuned on the traces they are measured on, and one verdict flipped between two identical runs.
 
 ## What I would do next
 
