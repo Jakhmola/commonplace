@@ -108,7 +108,8 @@ async def latest_evals(limit: int = Query(default=10, ge=1, le=50)) -> dict[str,
 
 class ResearchRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
-    # How many rounds of searching, and how many dollars, this run may use at most.
+    # At most this many rounds of searching, and this many dollars for planning and
+    # reflection. The report and its scoring are added on top (about $0.15).
     max_iterations: int | None = Field(default=None, ge=1, le=5)
     max_usd: float | None = Field(default=None, gt=0, le=5)
 
