@@ -20,6 +20,15 @@ What it does:
 - **Researches** harder questions with a bounded multi-search agent, and writes a
   **weekly digest** of what was published.
 
+## Architecture
+
+![Architecture: the write path ingests feeds and extracts claims as durable Inngest functions into Postgres and Memgraph; the read path fuses three retrievers to answer, evaluate, research and write a weekly digest](docs/architecture.svg)
+
+Everything in the write path, plus research, evaluation and the digest, runs as Inngest
+functions made of steps. A finished step never runs again on retry, so a crash after
+the embedding call does not pay for it twice. Nothing is deleted: an edited article
+supersedes its old passages and claims.
+
 ## Stack
 
 - **FastAPI** for the HTTP API
