@@ -73,6 +73,19 @@ def inngest_origins(*, dev: bool, base_url: str) -> tuple[str, str]:
     return base_url, base_url  # the dev server, or a self-hosted Inngest: one address
 
 
+def inngest_event_key(*, dev: bool, key: str) -> str | None:
+    """The event key for the client, never left for the SDK to read itself.
+
+    Given None, the SDK falls back to `INNGEST_EVENT_KEY` from the environment,
+    and `make` exports `.env`, where the key is empty in dev mode. An empty key
+    sends events to `/e/`, which the dev server answers with an empty redirect.
+    The dev server accepts any key, so it gets the SDK's own placeholder.
+    """
+    if key:
+        return key
+    return "NO_EVENT_KEY_SET" if dev else None
+
+
 _api_origin, _event_api_origin = inngest_origins(
     dev=settings.inngest_dev, base_url=settings.inngest_base_url
 )
@@ -84,7 +97,7 @@ client = inngest.Inngest(
     event_api_base_url=_event_api_origin,
     # Inngest Cloud: the event key authorises sending, the signing key verifies
     # that requests to /api/inngest really come from Inngest.
-    event_key=settings.inngest_event_key or None,
+    event_key=inngest_event_key(dev=settings.inngest_dev, key=settings.inngest_event_key),
     signing_key=settings.inngest_signing_key or None,
     logger=logging.getLogger("uvicorn"),
     middleware=[CostCaptureMiddleware],

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import inngest
 import pytest
 import yaml
@@ -43,7 +44,7 @@ from commonplace.functions.digest import (
 )
 from commonplace.functions.research import run_research_agent
 from commonplace.health import inngest_reachable
-from commonplace.inngest_client import inngest_origins
+from commonplace.inngest_client import inngest_event_key, inngest_origins
 from commonplace.main import DigestRequest, ResearchRequest
 from commonplace.mcp import tools
 from commonplace.mcp.server import mcp
@@ -621,6 +622,29 @@ def test_the_client_is_told_its_addresses_and_never_reads_them_from_the_environm
     )
     assert "localhost" not in str(getattr(cloud_client, "_api_origin", ""))
     assert "localhost" not in str(getattr(cloud_client, "_event_api_origin", ""))
+
+
+def test_an_empty_event_key_in_the_environment_does_not_reach_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `make start` exports .env, where INNGEST_EVENT_KEY is empty in dev mode. Left
+    # unset, the SDK read that empty string and sent events to /e/, which the dev
+    # server answers with an empty 303: every send failed with a JSON decode error.
+    monkeypatch.setenv("INNGEST_EVENT_KEY", "")
+    dev_client = inngest.Inngest(
+        app_id="t",
+        is_production=False,
+        api_base_url="http://localhost:8288",
+        event_api_base_url="http://localhost:8288",
+        event_key=inngest_event_key(dev=True, key=""),
+    )
+    request = dev_client._build_send_request([])
+    assert isinstance(request, httpx.Request)
+    assert not str(request.url).endswith("/e/")
+
+    assert inngest_event_key(dev=False, key="real") == "real"
+    assert inngest_event_key(dev=True, key="real") == "real"
+    assert inngest_event_key(dev=False, key="") is None  # cloud mode without a key stays an error
 
 
 def test_the_bounds_hold_for_events_sent_directly_too() -> None:
