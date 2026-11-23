@@ -116,7 +116,11 @@ async def cp_eval_report(
 async def cp_research(
     question: Annotated[
         str,
-        Field(description="A question that needs several searches, e.g. a comparison of authors"),
+        Field(
+            min_length=1,
+            max_length=2000,
+            description="A question that needs several searches, e.g. a comparison of authors",
+        ),
     ],
     max_iterations: Annotated[
         int | None, Field(ge=1, le=5, description="Rounds of searching at most (default 3)")
@@ -144,7 +148,9 @@ async def cp_research_result(
     wait. When it is completed (or budget_exceeded, which still has a report)
     the result has the `report` with inline citations, the cited sources, the
     searches of each round, `stop_reason` (why it stopped searching), the cost
-    in dollars and a `confidence` from the automatic checks and judges.
+    in dollars and a `confidence` from the automatic checks and judges. A
+    status of failed means the run ended in an error and has no report: start
+    a new one.
     """
     return await operations.get_research(research_id)
 

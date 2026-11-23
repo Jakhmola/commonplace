@@ -25,7 +25,7 @@ Six phases, each ending in something that runs:
    measured against labelled traces, a retrieval benchmark.
 6. **A bounded research agent, a weekly digest, a deployable image.**
 
-Today: 3 feeds, 60 articles, 1,529 passages, 466 claims, 221 tests, 13 MCP tools.
+Today: 3 feeds, 60 articles, 1,529 passages, 466 claims, 228 tests, 13 MCP tools.
 
 ## Key decisions and trade-offs
 

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from commonplace.db.models import Digest, ResearchRun
 from commonplace.db.queries import (
+    fail_research_run,
     finish_research_run,
     get_active_claims_for_articles,
     get_articles_in_window,
@@ -92,6 +93,34 @@ async def test_a_queued_run_becomes_running_and_a_finished_one_stays_finished(
     assert await status() == "completed"
 
 
+async def test_a_failure_does_not_overwrite_a_run_that_finished(db: AsyncSession) -> None:
+    start = {"research_id": "res_itest_3", "event_id": "evt-3", "question": "Q?"}
+    await start_research_run(db, **start)
+    await fail_research_run(db, research_id="res_itest_3", error="the provider was down")
+    failed = await get_research_run(db, "res_itest_3")
+    assert failed is not None
+    assert (failed["status"], failed["eval_summary"]) == (
+        "failed",
+        {"error": "the provider was down"},
+    )
+    assert failed["completed_at"] is not None
+
+    # found in review: the report was stored, then the last step failed for good
+    start["research_id"] = "res_itest_4"
+    await start_research_run(db, **start)
+    await finish_research_run(
+        db, research_id="res_itest_4", status="completed", report_text="A report [1]."
+    )
+    await fail_research_run(db, research_id="res_itest_4", error="could not send the event")
+    kept = await get_research_run(db, "res_itest_4")
+    assert kept is not None
+    assert (kept["status"], kept["report"], kept["eval_summary"]) == (
+        "completed",
+        "A report [1].",
+        {},
+    )
+
+
 def _digest(digest_id: uuid.UUID, start: datetime, text: str) -> dict[str, Any]:
     return {
         "digest_id": digest_id,
@@ -128,7 +157,8 @@ async def test_the_digest_window_falls_back_to_recent_articles(
     assert not fell_back
     seeded = next(a for a in in_window if a["article_id"] == str(article_id))
     assert (seeded["publication"], seeded["title"]) == ("Integration Test", "A seeded post")
-    assert all(start.isoformat() <= a["published_at"] for a in in_window)
+    end = (start + timedelta(days=1)).isoformat()
+    assert all(start.isoformat() <= a["published_at"] < end for a in in_window)
 
     empty_start = datetime(2090, 1, 5, tzinfo=UTC)
     recent, fell_back = await get_articles_in_window(

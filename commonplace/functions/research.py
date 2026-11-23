@@ -45,7 +45,11 @@ from commonplace.agents.roles.researcher import (
 )
 from commonplace.citations import NO_PASSAGES, citation, cited
 from commonplace.config import settings
-from commonplace.db.queries import finish_research_run, start_research_run
+from commonplace.db.queries import (
+    fail_research_run,
+    finish_research_run,
+    start_research_run,
+)
 from commonplace.db.session import get_session
 from commonplace.functions.evals import score_answer
 from commonplace.inngest_client import client
@@ -191,17 +195,16 @@ async def mark_failed(ctx: inngest.Context) -> None:
     will never finish.
     """
     failure: dict[str, Any] = dict(ctx.event.data or {})
-    original = ResearchRequested.model_validate(failure["event"]["data"])
+    research_id = ((failure.get("event") or {}).get("data") or {}).get("research_id")
+    if not research_id:
+        return  # the request itself was malformed: there is no run to mark
     error = failure.get("error")
     message = (error.get("message") or error.get("name")) if isinstance(error, dict) else error
 
     async def mark() -> None:
         async with get_session() as session:
-            await finish_research_run(
-                session,
-                research_id=original.research_id,
-                status="failed",
-                eval_summary={"error": str(message or "unknown error")},
+            await fail_research_run(
+                session, research_id=str(research_id), error=str(message or "unknown error")
             )
             await session.commit()
 

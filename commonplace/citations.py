@@ -11,7 +11,8 @@ from typing import Any
 NO_PASSAGES = "No relevant passages were found in the knowledge base for this question."
 
 _BRACKETS = re.compile(r"\[([\d\s,\-\u2013]+)\]")
-_PART = re.compile(r"\s*(\d+)\s*(?:[-\u2013]\s*(\d+)\s*)?")
+# Six digits is far beyond any passage number, and keeps int() away from absurd input.
+_PART = re.compile(r"\s*(\d{1,6})\s*(?:[-\u2013]\s*(\d{1,6})\s*)?")
 
 
 def cited_numbers(answer_text: str) -> set[int]:

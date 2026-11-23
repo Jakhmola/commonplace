@@ -144,15 +144,46 @@ citations valid, $0.04. Running it again left one row for the window.
 3. **The models write longer than asked**: about 600 words where the prompt says
    500, and 550 for the digest where it says 400. Not fixed.
 
+## What the review of this phase found
+
+An independent review found no critical defects. What I fixed, each with a test
+that failed first:
+
+1. **Cloud mode with `make start` sent events to the local dev server.** `make`
+   exports `.env`, and the Inngest SDK reads `INNGEST_BASE_URL` from the
+   environment when the client is not told its addresses. The client now always
+   passes them explicitly.
+2. A run whose report was stored and whose last step then failed was marked
+   `failed`. A failure now only changes a run that has not finished.
+3. The bounds were enforced by the HTTP models only; an event sent directly could
+   ask for 100,000 iterations. They now live in the event schemas.
+4. If the API could not record the run after sending the event, the caller got a
+   500 and no id for a run that had started. The id is returned regardless; the
+   function records the run itself.
+5. `cp_research` was annotated as safe to repeat, although every call starts a
+   new paid run.
+6. The citation parser still raised on a bracket holding thousands of digits.
+7. The production compose file advised percent-encoding the database password,
+   which does not work.
+
+Left as they are, and worth knowing: a run stopped by the iteration cap is
+`completed` even if its planning already cost more than `max_usd`; a hop whose
+embedding call or graph lookup failed quietly falls back to keywords and is not
+marked; a refused planner or critic call is retried before the run fails; with
+`API_TOKEN` set but `INNGEST_DEV=1`, `/api/inngest` is open, as the dev server
+needs; `/health` answers 200 with a dependency down (it reports `degraded` in the
+body), so the container health check does not catch a lost database.
+
 ## Verification
 
 | Check | Result |
 |---|---|
-| `make check` | pass, 221 tests |
+| `make check` | pass, 228 tests |
 | Loop bounds (fake step, fake model) | each of the five stop reasons reached; no model call after a hop that adds nothing |
 | `POST /research` defaults | 3 hops, `max_iterations_reached`, report with 12 citations from 9 articles |
 | `max_usd` 0.02 | stops after hop 1, status `budget_exceeded`, report still written |
 | `max_iterations` 6, unknown id | 422, 404 |
+| A direct event with `max_iterations` 100000 | rejected by the event schema, no run created, failure recorded |
 | `POST /digests/run` twice | one row for the window, `citations_valid: true` |
 | MCP over stdio | 13 tools; `cp_research` returns a handle, `cp_research_result` reads it, bad input is a tool error |
 | Production compose | refuses to start without secrets; image builds; stack healthy with placeholder keys; 401 without the token, 200 with it; migrations applied; runs as non-root; unsigned requests to `/api/inngest` rejected |

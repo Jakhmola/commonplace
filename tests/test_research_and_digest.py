@@ -28,7 +28,7 @@ from commonplace.agents.roles.researcher import (
     research_synthesizer,
     stop_reason_after_hop,
 )
-from commonplace.citations import format_context
+from commonplace.citations import NO_PASSAGES, cited_numbers, format_context
 from commonplace.config import Settings
 from commonplace.functions import FUNCTIONS, research
 from commonplace.functions.digest import (
@@ -43,6 +43,7 @@ from commonplace.functions.digest import (
 )
 from commonplace.functions.research import run_research_agent
 from commonplace.health import inngest_reachable
+from commonplace.inngest_client import inngest_origins
 from commonplace.main import DigestRequest, ResearchRequest
 from commonplace.mcp import tools
 from commonplace.mcp.server import mcp
@@ -375,7 +376,7 @@ async def test_queueing_research_returns_an_id_to_poll(monkeypatch: pytest.Monke
         "max_iterations": 2,
         "max_usd": None,
     }
-    # The row exists before the function starts, so the id can be polled at once.
+    # The API records the run itself, so the id can be polled before the function starts.
     assert recorded == [
         {"research_id": rid, "event_id": "evt-research", "question": "How do the authors differ?"}
     ]
@@ -597,3 +598,112 @@ def test_with_a_token_configured_the_api_requires_it(monkeypatch: pytest.MonkeyP
     # a health probe has no token, and Inngest signs its own requests
     assert api.get("/health").status_code == 200
     assert api.get("/api/inngest").status_code != 401
+
+
+# --- found in review of this phase ---
+
+
+def test_the_client_is_told_its_addresses_and_never_reads_them_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local, cloud = "http://localhost:8288", "https://api.inngest.com"
+    assert inngest_origins(dev=True, base_url=local) == (local, local)
+    assert inngest_origins(dev=False, base_url=cloud) == (cloud, "https://inn.gs")
+    own = "https://inngest.internal.example"
+    assert inngest_origins(dev=False, base_url=own) == (own, own)  # self-hosted: one address
+
+    # found in review: `make start` exports .env, the SDK fell back to INNGEST_BASE_URL,
+    # and a cloud-mode client sent every event to the local dev server
+    monkeypatch.setenv("INNGEST_BASE_URL", local)
+    api, events = inngest_origins(dev=False, base_url=cloud)
+    cloud_client = inngest.Inngest(
+        app_id="t", is_production=True, api_base_url=api, event_api_base_url=events, event_key="k"
+    )
+    assert "localhost" not in str(getattr(cloud_client, "_api_origin", ""))
+    assert "localhost" not in str(getattr(cloud_client, "_event_api_origin", ""))
+
+
+def test_the_bounds_hold_for_events_sent_directly_too() -> None:
+    # found in review: only the HTTP models were bounded, an event could ask for anything
+    for bad in (
+        {"max_iterations": 0},
+        {"max_iterations": 100_000},
+        {"max_usd": 0},
+        {"max_usd": 1e9},
+    ):
+        with pytest.raises(ValidationError):
+            ResearchRequested(research_id="res_x", question="q", **bad)
+    with pytest.raises(ValidationError):
+        ResearchRequested(research_id="res_x", question="")
+    for days in (0, -3, 91):
+        with pytest.raises(ValidationError):
+            DigestRequested(lookback_days=days)
+
+
+async def test_a_run_can_still_be_read_when_the_api_could_not_record_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def send(_: inngest.Event) -> list[str]:
+        return ["evt-research"]
+
+    async def database_is_down(**_: Any) -> None:
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(operations.client, "send", send)
+    monkeypatch.setattr(operations, "_record_research", database_is_down)
+    # found in review: this was a 500 without the id, for a run that had already started
+    handle = await operations.queue_research("A question?")
+    assert handle["research_id"].startswith("res_") and handle["status"] == "queued"
+
+
+async def test_starting_research_is_not_marked_as_safe_to_repeat() -> None:
+    by_name = {tool.name: tool for tool in await mcp.list_tools()}
+    # found in review: every call starts a new paid run
+    research_tool, sync_tool = by_name["cp_research"].annotations, by_name["cp_sync"].annotations
+    assert research_tool is not None and sync_tool is not None
+    assert research_tool.idempotent_hint is False
+    assert sync_tool.idempotent_hint is True
+    question = by_name["cp_research"].input_schema["properties"]["question"]
+    assert (question["minLength"], question["maxLength"]) == (1, 2000)
+    assert "failed" in (by_name["cp_research_result"].description or "")
+
+
+def test_a_bracket_full_of_digits_does_not_break_the_citation_parser() -> None:
+    # found in review: int() refuses a number this long
+    assert cited_numbers("[" + "1" * 5000 + "]") == set()
+    assert cited_numbers("[12] and [1234567]") == {12}
+
+
+async def test_the_report_is_written_only_when_there_is_something_to_write_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    passages = [_hit("p1", 0.03), _hit("p2", 0.02)]
+    calls: list[str] = []
+
+    def writer(text: str, stop_reason: str = "end_turn") -> Any:
+        async def call(**_: Any) -> dict[str, Any]:
+            calls.append("report")
+            usage = {"model": "m", "input_tokens": 1, "output_tokens": 1, "est_usd": 0.06}
+            return {"output": text, "usage": usage, "stop_reason": stop_reason}
+
+        return call
+
+    monkeypatch.setattr(agents_core, "call_llm", writer("Both agree [1][2]. Nothing on [7]."))
+    report, citations, usd = await research.write_report(
+        _Step(), question="q", passages=passages, has_llm=True
+    )
+    assert [c["citation_idx"] for c in citations] == [1, 2] and usd == 0.06
+
+    nothing = await research.write_report(_Step(), question="q", passages=[], has_llm=True)
+    assert nothing == (NO_PASSAGES, [], 0.0) and calls == ["report"]  # no call for an empty pool
+
+    report, citations, usd = await research.write_report(
+        _Step(), question="q", passages=passages, has_llm=False
+    )
+    assert "ANTHROPIC_API_KEY" in report and len(citations) == 2 and usd == 0.0
+
+    monkeypatch.setattr(agents_core, "call_llm", writer("", stop_reason="refusal"))
+    report, citations, _ = await research.write_report(
+        _Step(), question="q", passages=passages, has_llm=True
+    )
+    assert report == "The model declined to write this report." and citations == []

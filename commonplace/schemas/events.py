@@ -9,7 +9,7 @@ from typing import Literal
 from uuid import UUID
 
 import inngest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 PUBLICATION_ADDED = "cp/publication.added"
 FEED_POLL = "cp/feed.poll"
@@ -113,9 +113,10 @@ class ResearchRequested(BaseModel):
     """
 
     research_id: str
-    question: str
-    max_iterations: int | None = None
-    max_usd: float | None = None
+    question: str = Field(min_length=1, max_length=2000)
+    # Bounded here, not only at the HTTP API: an event can be sent directly.
+    max_iterations: int | None = Field(default=None, ge=1, le=5)
+    max_usd: float | None = Field(default=None, gt=0, le=5)
 
 
 class ResearchCompleted(BaseModel):
@@ -133,7 +134,7 @@ class ResearchCompleted(BaseModel):
 class DigestRequested(BaseModel):
     """Anyone -> digest. Write the digest now instead of waiting for Monday."""
 
-    lookback_days: int = 7
+    lookback_days: int = Field(default=7, ge=1, le=90)
 
 
 class DigestPublished(BaseModel):

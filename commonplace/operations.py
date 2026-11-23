@@ -6,6 +6,7 @@ Slow work is sent to Inngest as an event and returns a handle at once; reads
 go straight to Postgres.
 """
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -47,6 +48,8 @@ from commonplace.schemas.events import (
 )
 from commonplace.schemas.ids import canonical_id, clean_url, research_id
 from commonplace.sources.allowlist import PublicationEntry, assert_allowed, load_publications
+
+logger = logging.getLogger(__name__)
 
 _RETRIEVERS = {"hybrid": hybrid, "sparse": sparse, "dense": dense}
 
@@ -295,8 +298,13 @@ async def queue_research(
         research_id=rid, question=question, max_iterations=max_iterations, max_usd=max_usd
     )
     (event_id,) = await _send(event(RESEARCH_REQUESTED, requested))
-    # Written here as well as by the function, so the id can be polled before the run starts.
-    await _record_research(research_id=rid, event_id=event_id, question=question)
+    # Written here as well as by the function, so the id can be polled before the
+    # run starts. The event is already sent: if this write fails the run goes on
+    # and records itself, so the caller must still get its id.
+    try:
+        await _record_research(research_id=rid, event_id=event_id, question=question)
+    except Exception:
+        logger.exception("Could not record research run %s as queued", rid)
     return _handle(event_id, research_id=rid)
 
 

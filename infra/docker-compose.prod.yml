@@ -36,7 +36,7 @@ services:
       dockerfile: Dockerfile
     restart: always
     environment:
-      # The password goes into a URL: keep it to letters and digits, or percent-encode it.
+      # The password goes into this URL as it is: use letters and digits only.
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-commonplace}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-commonplace}
       MEMGRAPH_URI: bolt://memgraph:7687
       INNGEST_DEV: "0"

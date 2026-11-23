@@ -17,13 +17,14 @@ mcp = MCPServer(
 )
 
 
-def _annotations(read_only: bool) -> ToolAnnotations:
-    # Nothing here deletes or overwrites; repeating a call is safe; and every
-    # tool stays inside the knowledge base rather than reaching the open web.
+def _annotations(read_only: bool, idempotent: bool = True) -> ToolAnnotations:
+    # Nothing here deletes or overwrites, and every tool stays inside the
+    # knowledge base rather than reaching the open web. Repeating a call is
+    # safe for all but one: ingestion skips what is stored, research does not.
     return ToolAnnotations(
         read_only_hint=read_only,
         destructive_hint=False,
-        idempotent_hint=True,
+        idempotent_hint=idempotent,
         open_world_hint=False,
     )
 
@@ -41,8 +42,10 @@ for _read in (
 ):
     mcp.add_tool(_read, annotations=_annotations(read_only=True))
 
+# Every call starts a new run that costs money: not something to repeat freely.
+mcp.add_tool(tools.cp_research, annotations=_annotations(read_only=False, idempotent=False))
+
 for _trigger in (
-    tools.cp_research,
     tools.cp_add_publication,
     tools.cp_backfill,
     tools.cp_sync,

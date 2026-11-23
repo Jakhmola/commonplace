@@ -952,6 +952,20 @@ async def finish_research_run(session: AsyncSession, *, research_id: str, **fiel
     )
 
 
+async def fail_research_run(session: AsyncSession, *, research_id: str, error: str) -> None:
+    """Mark a run as failed, unless it already finished: a run whose report was
+    stored and whose very last step then failed keeps its report and status.
+    """
+    await session.execute(
+        update(ResearchRun)
+        .where(
+            ResearchRun.research_id == research_id,
+            ResearchRun.status.in_(("queued", "running")),
+        )
+        .values(status="failed", eval_summary={"error": error}, completed_at=func.clock_timestamp())
+    )
+
+
 async def get_research_run(session: AsyncSession, research_id: str) -> dict[str, Any] | None:
     """One run as a reader wants it: everything except the raw evidence pool."""
     run = await session.get(ResearchRun, research_id, populate_existing=True)

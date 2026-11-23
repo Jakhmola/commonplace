@@ -61,11 +61,27 @@ class CostCaptureMiddleware(inngest.Middleware):
             logger.exception("Could not record cost %s", usage)
 
 
+def inngest_origins(*, dev: bool, base_url: str) -> tuple[str, str]:
+    """(API address, event API address) for the client.
+
+    Always passed explicitly. Left unset, the SDK reads `INNGEST_BASE_URL`
+    from the environment, and `make` exports `.env`: a cloud-mode client
+    would then send every event to the local dev server address.
+    """
+    if not dev and base_url == "https://api.inngest.com":
+        return base_url, "https://inn.gs"  # Inngest Cloud takes events on its own host
+    return base_url, base_url  # the dev server, or a self-hosted Inngest: one address
+
+
+_api_origin, _event_api_origin = inngest_origins(
+    dev=settings.inngest_dev, base_url=settings.inngest_base_url
+)
+
 client = inngest.Inngest(
     app_id="commonplace",
     is_production=not settings.inngest_dev,
-    api_base_url=settings.inngest_base_url if settings.inngest_dev else None,
-    event_api_base_url=settings.inngest_base_url if settings.inngest_dev else None,
+    api_base_url=_api_origin,
+    event_api_base_url=_event_api_origin,
     # Inngest Cloud: the event key authorises sending, the signing key verifies
     # that requests to /api/inngest really come from Inngest.
     event_key=settings.inngest_event_key or None,

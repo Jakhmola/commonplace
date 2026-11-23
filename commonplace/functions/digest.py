@@ -153,8 +153,9 @@ def _title(start: datetime, end: datetime, fell_back: bool) -> str:
 async def generate_weekly_digest(ctx: inngest.Context) -> dict[str, object]:
     # A cron run carries no payload of ours: it gets the configured lookback.
     data = ctx.event.data if ctx.event.name == DIGEST_REQUESTED else {}
+    given = {key: value for key, value in (data or {}).items() if value is not None}
     payload = DigestRequested.model_validate(
-        {"lookback_days": settings.digest_lookback_days, **(data or {})}
+        {"lookback_days": settings.digest_lookback_days, **given}
     )
 
     async def collect() -> dict[str, Any]:
